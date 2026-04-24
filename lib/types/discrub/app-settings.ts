@@ -1,0 +1,41 @@
+import { DiscrubSetting } from "../../enum/discrub-enum";
+import { SortDirection } from "../../enum/common-enum";
+
+type AppSettingsMap = {
+  [DiscrubSetting.BROWSER_ENV]: string;
+  [DiscrubSetting.REACTIONS_ENABLED]: string;
+  [DiscrubSetting.SERVER_NICKNAME_LOOKUP]: string;
+  [DiscrubSetting.DISPLAY_NAME_LOOKUP]: string;
+  [DiscrubSetting.SEARCH_DELAY]: string;
+  [DiscrubSetting.DELETE_DELAY]: string;
+  [DiscrubSetting.DELAY_MODIFIER]: string;
+  [DiscrubSetting.DATE_FORMAT]: string;
+  [DiscrubSetting.TIME_FORMAT]: string;
+  [DiscrubSetting.EXPORT_SEPARATE_THREAD_AND_FORUM_POSTS]: string;
+  [DiscrubSetting.EXPORT_ARTIST_MODE]: string;
+  [DiscrubSetting.EXPORT_MESSAGE_SORT_ORDER]: SortDirection;
+  [DiscrubSetting.EXPORT_PREVIEW_MEDIA]: string;
+  [DiscrubSetting.EXPORT_DOWNLOAD_MEDIA]: string;
+  [DiscrubSetting.EXPORT_MESSAGES_PER_PAGE]: string;
+  [DiscrubSetting.PURGE_RETAIN_ATTACHED_MEDIA]: string;
+  [DiscrubSetting.PURGE_DELETE_ATTACHMENTS_ONLY]: string;
+  [DiscrubSetting.PURGE_REACTION_REMOVAL_FROM]: string;
+  [DiscrubSetting.PURGE_MODE]: string;
+  [DiscrubSetting.APP_SHOW_KOFI_FEED]: string;
+  [DiscrubSetting.APP_USER_DATA_REFRESH_RATE]: string;
+  [DiscrubSetting.APP_THEME_MODE]: string;
+  [DiscrubSetting.EXPORT_MEDIA_IMAGES]: string;
+  [DiscrubSetting.EXPORT_MEDIA_VIDEOS]: string;
+  [DiscrubSetting.EXPORT_MEDIA_AUDIO]: string;
+  [DiscrubSetting.EXPORT_MEDIA_OTHER]: string;
+  [DiscrubSetting.EXPORT_FORMAT]: string;
+  [DiscrubSetting.EXPORT_PRESETS]: string;
+  [DiscrubSetting.EXPORT_RECENT_HISTORY]: string;
+  [DiscrubSetting.EXPORT_TEMPLATE]: string;
+  [DiscrubSetting.CACHED_USER_MAP]: string;
+  [DiscrubSetting.CACHED_ANNOUNCEMENT_REV]: string;
+  [DiscrubSetting.APP_TOUR_SHELL_COMPLETED]: string;
+  [DiscrubSetting.APP_TOUR_CONTEXTUAL_COMPLETED]: string;
+};
+
+export type AppSettings = AppSettingsMap;

@@ -1,0 +1,53 @@
+// https://discord.com/developers/docs/resources/channel#message-object
+import type { ApplicationObject } from "./application-object";
+import type { Attachment } from "./attachment";
+import type { Channel } from "./channel";
+import type { ChannelMentionObject } from "./channel-mention-object";
+import type { ComponentObject } from "./component-object";
+import type { Embed } from "./embed";
+import type { MessageActivityObject } from "./message-activity-object";
+import type { MessageCallObject } from "./message-call-object";
+import type { MessageInteractionObject } from "./message-interaction-object";
+import type { MessageReferenceObject } from "./message-reference-object";
+import type { Reaction } from "./reaction";
+import type { ResolvedDataObject } from "./resolved-data-object";
+import type { RoleSubscriptionDataObject } from "./role-subscription-data-object";
+import type { StickerItemObject } from "./sticker-item-object";
+import type { StickerObject } from "./sticker-object";
+import type { User } from "./user";
+
+export type Message = {
+  id: string;
+  channel_id: string;
+  call?: MessageCallObject;
+  author: User;
+  content: string;
+  timestamp: string;
+  edited_timestamp: string | null | undefined;
+  tts: boolean;
+  mention_everyone: boolean;
+  mentions: User[];
+  mention_channels?: ChannelMentionObject[];
+  attachments: Attachment[];
+  embeds: Embed[];
+  reactions?: Reaction[];
+  nonce?: string | number;
+  pinned: boolean;
+  webhook_id?: string;
+  type: number;
+  activity?: MessageActivityObject;
+  application?: ApplicationObject;
+  application_id?: string;
+  message_reference?: MessageReferenceObject;
+  flags?: number;
+  referenced_message?: Message | null | undefined;
+  interaction?: MessageInteractionObject;
+  thread?: Channel;
+  components?: ComponentObject[];
+  sticker_items?: StickerItemObject[];
+  stickers?: StickerObject[];
+  position?: number;
+  role_subscription_data?: RoleSubscriptionDataObject;
+  resolved?: ResolvedDataObject;
+  userName?: string; // Used for quick filtering purposes
+};

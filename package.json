@@ -1,0 +1,158 @@
+{
+  "name": "discrub-core",
+  "private": false,
+  "version": "1.0.0",
+  "license": "UNLICENSED",
+  "author": "prathercc",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/prathercc/discrub-core.git"
+  },
+  "bugs": {
+    "url": "https://github.com/prathercc/discrub-core/issues"
+  },
+  "homepage": "https://github.com/prathercc/discrub-core#readme",
+  "type": "module",
+  "exports": {
+    "./discord-service": {
+      "types": "./lib/services/discord-service.ts",
+      "import": "./dist/discord-service.js"
+    },
+    "./github-service": {
+      "types": "./lib/services/github-service.ts",
+      "import": "./dist/github-service.js"
+    },
+    "./export-data-service": {
+      "types": "./lib/services/export-data-service.ts",
+      "import": "./dist/export-data-service.js"
+    },
+    "./discrub-guards": {
+      "types": "./lib/guards/discrub-guards.ts",
+      "import": "./dist/discrub-guards.js"
+    },
+    "./common-guards": {
+      "types": "./lib/guards/common-guards.ts",
+      "import": "./dist/common-guards.js"
+    },
+    "./discrub-utils": {
+      "types": "./lib/utils/discrub-utils.ts",
+      "import": "./dist/discrub-utils.js"
+    },
+    "./common-utils": {
+      "types": "./lib/utils/common-utils.ts",
+      "import": "./dist/common-utils.js"
+    },
+    "./message-formatting-utils": {
+      "types": "./lib/utils/message-formatting-utils.ts",
+      "import": "./dist/message-formatting-utils.js"
+    },
+    "./export-utils": {
+      "types": "./lib/utils/export-utils.ts",
+      "import": "./dist/export-utils.js"
+    },
+    "./html-formatting-utils": {
+      "types": "./lib/utils/html-formatting-utils.ts",
+      "import": "./dist/html-formatting-utils.js"
+    },
+    "./system-messages": {
+      "types": "./lib/utils/system-messages.ts",
+      "import": "./dist/system-messages.js"
+    },
+    "./filtering": {
+      "types": "./lib/filtering/index.ts",
+      "import": "./dist/filtering.js"
+    },
+    "./messages": {
+      "types": "./lib/messages/index.ts",
+      "import": "./dist/messages.js"
+    },
+    "./regex": {
+      "types": "./lib/regex/index.ts",
+      "import": "./dist/regex.js"
+    },
+    "./constants": {
+      "types": "./lib/constants/index.ts",
+      "import": "./dist/constants.js"
+    },
+    "./common-enum": {
+      "types": "./lib/enum/common-enum.ts",
+      "import": "./dist/common-enum.js"
+    },
+    "./discord-enum": {
+      "types": "./lib/enum/discord-enum.ts",
+      "import": "./dist/discord-enum.js"
+    },
+    "./discrub-enum": {
+      "types": "./lib/enum/discrub-enum.ts",
+      "import": "./dist/discrub-enum.js"
+    },
+    "./types/discord-types": {
+      "types": "./lib/types/discord-types.ts",
+      "default": "./lib/types/discord-types.ts"
+    },
+    "./types/discrub-types": {
+      "types": "./lib/types/discrub-types.ts",
+      "default": "./lib/types/discrub-types.ts"
+    },
+    "./types/message-formatting-types": {
+      "types": "./lib/types/message-formatting-types.ts",
+      "default": "./lib/types/message-formatting-types.ts"
+    },
+    "./types/html-formatting-types": {
+      "types": "./lib/types/html-formatting-types.ts",
+      "default": "./lib/types/html-formatting-types.ts"
+    },
+    "./highlight.js/styles/vs2015.css": {
+      "default": "./node_modules/highlight.js/styles/vs2015.css"
+    }
+  },
+  "files": [
+    "dist",
+    "lib/types",
+    "lib/utils",
+    "lib/guards",
+    "lib/services",
+    "lib/enum",
+    "lib/regex",
+    "lib/constants",
+    "lib/filtering",
+    "lib/messages"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --p ./tsconfig-build.json && vite build",
+    "lint": "eslint .",
+    "preview": "vite preview",
+    "test": "vitest run --config vitest.config.ts",
+    "test:watch": "vitest --config vitest.config.ts",
+    "test:ui": "vitest --ui --config vitest.config.ts",
+    "test:coverage": "vitest run --coverage --config vitest.config.ts",
+    "test:unit": "vitest run --testPathPattern=lib --config vitest.config.ts",
+    "storybook": "storybook dev -p 6006",
+    "build-storybook": "storybook build",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "dependencies": {
+    "copy-to-clipboard": "^3.3.3",
+    "date-fns": "^3.1.0",
+    "date-fns-tz": "^3.2.0",
+    "filenamify": "^6.0.0",
+    "highlight.js": "^11.10.0",
+    "nanoid": "^5.1.5"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.21.0",
+    "@types/node": "^22.13.13",
+    "@vitest/browser": "^3.1.1",
+    "@vitest/coverage-v8": "^3.1.1",
+    "eslint": "^9.21.0",
+    "eslint-config-prettier": "^10.1.1",
+    "globals": "^15.15.0",
+    "prettier": "3.5.3",
+    "typescript": "~5.7.2",
+    "typescript-eslint": "^8.24.1",
+    "vite": "^6.2.0",
+    "vite-plugin-dts": "^4.5.3",
+    "vitest": "^3.1.1"
+  }
+}

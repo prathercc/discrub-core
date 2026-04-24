@@ -1,0 +1,45 @@
+// https://discord.com/developers/docs/resources/channel#channel-object
+import type { DefaultReactionObject } from "./default-reaction-object";
+import type { ForumTagObject } from "./forum-tag-object";
+import type { OverwriteObject } from "./overwrite-object";
+import type { ThreadMemberObject } from "./thread-member-object";
+import type { ThreadMetaData } from "./thread-metadata";
+import type { User } from "./user";
+
+export type Channel = {
+  id: string;
+  type: number;
+  guild_id?: string;
+  position?: number;
+  permission_overwrites?: OverwriteObject[];
+  name?: string | null | undefined;
+  topic?: string | null | undefined;
+  nsfw?: boolean;
+  last_message_id?: string | null | undefined;
+  bitrate?: number;
+  user_limit?: number;
+  rate_limit_per_user?: number;
+  recipients?: User[];
+  icon?: string | null | undefined;
+  owner_id?: string;
+  application_id?: string;
+  managed?: boolean;
+  parent_id?: string | null | undefined;
+  last_pin_timestamp?: string | null | undefined;
+  rtc_region?: string | null | undefined;
+  video_quality_mode?: number;
+  message_count?: number;
+  member_count?: number;
+  thread_metadata?: ThreadMetaData;
+  member?: ThreadMemberObject;
+  default_auto_archive_duration?: number;
+  permissions?: string;
+  flags?: number;
+  total_message_sent?: number;
+  available_tags?: ForumTagObject[];
+  applied_tags?: string[];
+  default_reaction_emoji?: DefaultReactionObject | null | undefined;
+  default_thread_rate_limit_per_user?: number;
+  default_sort_order?: number | null | undefined;
+  default_forum_layout?: number;
+};

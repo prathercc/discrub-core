@@ -1,0 +1,9 @@
+// https://discord.com/developers/docs/topics/permissions#role-object-role-tags-structure
+export type RoleTags = {
+  bot_id?: string;
+  integration_id?: string;
+  premium_subscriber?: null;
+  subscription_listing_id?: string;
+  available_for_purchase?: null;
+  guild_connections?: null;
+};
