@@ -1321,6 +1321,172 @@ describe('DiscordService', () => {
       expect(pages).toHaveLength(200);
       expect(callCount).toBe(200);
     }, 10000);
+
+    it('does not terminate when total_results=0 but messages are populated (test-mock edge)', async () => {
+      // Initial-empty fast path requires BOTH total_results=0 AND
+      // pageMessages.length=0 to terminate. Some test mocks omit
+      // total_results (defaults to 0) while populating messages —
+      // the iterator must continue in that case, not terminate.
+      let callCount = 0;
+      vi.stubGlobal('fetch', vi.fn(async () => {
+        callCount++;
+        if (callCount === 1) {
+          // total_results omitted (→ 0) but messages populated.
+          const msgs = Array.from({ length: 3 }, (_, i) => makeMessage(`m${i}`));
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ messages: msgs.map((m) => [m]) }),
+          };
+        }
+        // Subsequent calls return empty so the standard 2-consecutive-
+        // empties terminator kicks in.
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ messages: [] }),
+        };
+      }));
+
+      const pages: any[] = [];
+      for await (const page of service.iterateSearchResults({
+        token: testAuth,
+        channelId: testChannelId,
+        guildId: testGuildId,
+        criteria: baseSearchCriteria,
+      })) {
+        pages.push(page);
+      }
+
+      // First page yielded with 3 messages. Iterator did NOT terminate
+      // on the initial-empty fast path despite total_results=0.
+      expect(pages.length).toBeGreaterThanOrEqual(1);
+      expect(pages[0].messages).toHaveLength(3);
+      // Iterator continued past the data page to the empty terminator.
+      expect(callCount).toBeGreaterThanOrEqual(3);
+    });
+
+    it('legacy onBetweenPages "reset" still resets offset (safety hatch)', async () => {
+      // The wrapper no longer uses this hook (the iterator self-detects
+      // via total_results), but we keep the API for tests + future
+      // consumers. Verify a manual 'reset' return still flips offset
+      // to 0 mid-walk.
+      const calls: string[] = [];
+      let callCount = 0;
+      vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+        calls.push(url);
+        callCount++;
+        if (callCount === 1) {
+          // First page: 25 results so offset would advance to 25.
+          const msgs = Array.from({ length: 25 }, (_, i) => makeMessage(`a${i}`));
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ messages: msgs.map((m) => [m]), total_results: 50 }),
+          };
+        }
+        // After the manual 'reset', offset should be 0 again — verify
+        // by URL inspection.
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ messages: [], total_results: 50 }),
+        };
+      }));
+
+      let resetSent = false;
+      const pages: any[] = [];
+      for await (const page of service.iterateSearchResults({
+        token: testAuth,
+        channelId: testChannelId,
+        guildId: testGuildId,
+        criteria: baseSearchCriteria,
+        onBetweenPages: () => {
+          if (!resetSent) {
+            resetSent = true;
+            return 'reset';
+          }
+          return false;
+        },
+      })) {
+        pages.push(page);
+      }
+
+      // After the explicit 'reset', the second URL must NOT carry an
+      // advanced offset (=25). It should be at offset 0 (or no offset
+      // qs param, which means 0).
+      const url2 = calls[1];
+      expect(url2 && !url2.includes('offset=25')).toBe(true);
+    });
+
+    it('consecutive-empty counter resets on a non-empty page (no premature termination)', async () => {
+      // Sequence: empty → empty would terminate at threshold=2. But if
+      // a non-empty page lands between them, the counter resets and the
+      // iterator continues. Verify we get all data even when empties
+      // are interleaved with progress.
+      let callCount = 0;
+      vi.stubGlobal('fetch', vi.fn(async () => {
+        callCount++;
+        if (callCount === 1) {
+          const msgs = Array.from({ length: 25 }, (_, i) => makeMessage(`a${i}`));
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ messages: msgs.map((m) => [m]), total_results: 100 }),
+          };
+        }
+        if (callCount === 2) {
+          // Empty page → consecutiveEmpty=1 (not terminator)
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ messages: [], total_results: 100 }),
+          };
+        }
+        if (callCount === 3) {
+          // Non-empty page → counter MUST reset to 0
+          const msgs = Array.from({ length: 5 }, (_, i) => makeMessage(`b${i}`));
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ messages: msgs.map((m) => [m]), total_results: 100 }),
+          };
+        }
+        if (callCount === 4) {
+          // Empty again — consecutiveEmpty=1 (counter was reset by
+          // call 3, so this is NOT the second consecutive empty)
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ messages: [], total_results: 100 }),
+          };
+        }
+        // call 5: empty → consecutiveEmpty=2 → terminate
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ messages: [], total_results: 100 }),
+        };
+      }));
+
+      const pages: any[] = [];
+      for await (const page of service.iterateSearchResults({
+        token: testAuth,
+        channelId: testChannelId,
+        guildId: testGuildId,
+        criteria: baseSearchCriteria,
+      })) {
+        pages.push(page);
+      }
+
+      // Both data pages were yielded → the empty between them did NOT
+      // prematurely terminate. Counter reset on the non-empty page,
+      // then 2 consecutive empties at the end terminated.
+      const dataPages = pages.filter((p) => p.messages.length > 0);
+      expect(dataPages).toHaveLength(2);
+      expect(dataPages[0].messages).toHaveLength(25);
+      expect(dataPages[1].messages).toHaveLength(5);
+    });
   });
 
   describe('Snowflake Generation', () => {
