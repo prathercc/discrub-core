@@ -107,6 +107,7 @@
     }
   },
   "files": [
+    "CHANGELOG.md",
     "dist",
     "lib/types",
     "lib/utils",
