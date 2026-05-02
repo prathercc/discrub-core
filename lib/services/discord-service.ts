@@ -384,33 +384,67 @@ class DiscordService {
    *
    * Handles Discord's offset pagination (25 hits per page, max offset 5000)
    * and transparently continues past the 5000-match cap by restarting the
-   * search with a `searchAfterDate` boundary set to the last message in the
-   * previous batch. Callers that consume this generator will receive every
-   * matching message regardless of total count.
+   * search with a `searchBeforeDate` (max_id) boundary tightened to the
+   * oldest message in the previous batch. Walks newest → oldest within the
+   * caller's user-supplied window; never widens the user's bounds.
+   *
+   * Per Discord's API docs (`docs.discord.com/developers/resources/message`):
+   * - "Clients should not rely on the length of the messages array to
+   *   paginate results" — search may return fewer than the page size for
+   *   index-lag reasons even mid-walk. Termination uses two consecutive
+   *   raw-empty pages instead.
+   * - "When messages are actively being created or deleted, the
+   *   total_results field may not be accurate" — totalResults shifts
+   *   between pages signal a reshuffle and trigger an offset=0 reset of
+   *   the current query window.
+   * - 202 Accepted with `retry_after` is returned when an entity isn't yet
+   *   indexed; we sleep and retry the same fetch.
    *
    * The generator does NOT delay between pages on its own. Callers inject
    * their own delay + cancellation via `options.onBetweenPages` (return
    * `true` to stop) and `options.shouldStop` (polled before each request).
    *
-   * Each yielded page has already been flattened (Discord returns messages
-   * as context-groups) and deduplicated against previous pages.
+   * Discord's search response is shaped `Message[][]` (legacy nested
+   * format); under current API each inner array contains the hit only,
+   * surrounding context messages are no longer returned. Yielded pages
+   * are flattened and deduplicated against previous pages — the dedup
+   * Set is harmless under hits-only behavior and protects against any
+   * future regression to context-bearing responses.
    */
   iterateSearchResults = async function* (
     this: DiscordService,
     options: SearchIterationOptions,
   ): AsyncGenerator<SearchIterationPage, void, void> {
-    const SEARCH_PAGE_SIZE = 25;
     const MAX_PER_QUERY = 5000;
+    const EMPTY_PAGE_TERMINATE_THRESHOLD = 2;
+    const RETRY_AFTER_DEFAULT_SECONDS = 1;
 
     let currentCriteria: SearchCriteria = { ...options.criteria };
     let offset = 0;
     let pageIndex = 0;
     let aggregatedCount = 0;
     let crossedQueryBoundary = false;
+    let prevTotalResults: number | null = null;
+    let pendingReset = false;
+    let consecutiveEmptyPages = 0;
     const seen = new Set<string>();
+
+    // User-supplied lower bound (snowflake form) for the cap-shift guard.
+    // We tighten the upper bound (max_id) at each cap; if that ever drops
+    // to or below the user's lower bound, the window has collapsed and we
+    // terminate. Discord would return zero matches anyway; the explicit
+    // guard saves the wasted call.
+    const userLowerBoundSnowflake = options.criteria.searchAfterDate
+      ? this.generateSnowflake(options.criteria.searchAfterDate)
+      : null;
 
     while (true) {
       if (options.shouldStop && (await options.shouldStop())) return;
+
+      if (pendingReset) {
+        offset = 0;
+        pendingReset = false;
+      }
 
       const response = await this.fetchSearchMessageData(
         options.token,
@@ -419,6 +453,16 @@ class DiscordService {
         options.guildId,
         currentCriteria,
       );
+
+      // 202 Accepted: entity isn't yet indexed. Sleep retry_after and
+      // refetch the same offset/criteria. retry_after = 0 means "short
+      // delay" — we use a small default.
+      if (response.success && response.status === 202) {
+        const retryAfter =
+          (response.data as { retry_after?: number } | undefined)?.retry_after ?? 0;
+        await wait(retryAfter > 0 ? retryAfter : RETRY_AFTER_DEFAULT_SECONDS);
+        continue;
+      }
 
       if (!response.success || !response.data) {
         const err = new Error(
@@ -446,8 +490,8 @@ class DiscordService {
 
       const totalResults = searchResult.total_results ?? 0;
 
-      // Yield every page (including the first, even if empty) so callers can
-      // learn totalResults up-front. Subsequent empty pages stop the loop.
+      // Yield every page (including the first, even if empty) so callers
+      // can learn totalResults up-front.
       yield {
         messages: pageMessages,
         totalResults,
@@ -458,42 +502,83 @@ class DiscordService {
       crossedQueryBoundary = false;
       pageIndex++;
 
-      // Discord returns up to 25 groups per page. A partial page is the
-      // last page of the current query.
-      const isLastPage = rawCount < SEARCH_PAGE_SIZE;
+      // Initial-empty fast path: yield once with totalResults=0 + no
+      // messages so the caller learns there are zero matches, then
+      // terminate. Both conditions matter — total_results can be 0 in
+      // tests/mocks while messages are populated (inconsistent fixture
+      // shape), and we don't want to terminate on the first page in
+      // that case.
+      if (totalResults === 0 && pageMessages.length === 0 && pageIndex === 1) return;
+
+      // Termination rule: two consecutive raw-empty pages. Replaces the
+      // unsafe "rawCount < page size = done" heuristic that Discord's docs
+      // explicitly warn against.
+      if (rawCount === 0) {
+        consecutiveEmptyPages++;
+        if (consecutiveEmptyPages >= EMPTY_PAGE_TERMINATE_THRESHOLD) return;
+      } else {
+        consecutiveEmptyPages = 0;
+      }
+
+      // Cap-shift: hit the 5000-match per-query ceiling. Tighten max_id
+      // (searchBeforeDate) to the oldest-seen message and restart the
+      // window at offset=0. Walk strictly newest→oldest; user's
+      // lower bound (searchAfterDate / min_id) is preserved.
       const nextOffset = offset + rawCount;
       const atOrPastCap = nextOffset >= MAX_PER_QUERY;
-
-      if (isLastPage && !atOrPastCap) return;
-
       if (atOrPastCap) {
-        // Hit the 5000-match cap. Reset offset and seed a searchAfterDate
-        // boundary from the oldest-seen message in this batch so the next
-        // query picks up where we left off. Matches the pattern used by
-        // `loadAllSearchResults` in discrub-web's messageSlice.
         if (flatMessages.length === 0) return;
         const lastMessage = flatMessages[flatMessages.length - 1];
         if (!lastMessage?.timestamp) return;
+
+        const newSearchBeforeDate = new Date(lastMessage.timestamp);
+        if (userLowerBoundSnowflake) {
+          const newUpperSnowflake = this.generateSnowflake(newSearchBeforeDate);
+          if (BigInt(newUpperSnowflake) <= BigInt(userLowerBoundSnowflake)) {
+            return;
+          }
+        }
         currentCriteria = {
           ...currentCriteria,
-          searchAfterDate: new Date(lastMessage.timestamp),
+          searchBeforeDate: newSearchBeforeDate,
         };
         offset = 0;
         crossedQueryBoundary = true;
+        prevTotalResults = null;
+        consecutiveEmptyPages = 0;
       } else {
-        offset = nextOffset;
+        // total_results shift between pages signals reshuffle; reset to
+        // offset=0 of the same query window on the next iteration. The
+        // `seen` Set carries forward so already-yielded messages don't
+        // re-process if they reappear.
+        if (prevTotalResults !== null && totalResults !== prevTotalResults) {
+          pendingReset = true;
+        }
+        prevTotalResults = totalResults;
+
+        // Empty page at non-zero offset means results moved out from
+        // under us (deletes by mutating consumers, or transient indexer
+        // state). Reset to offset=0 so we don't loop on the same
+        // stale-empty offset.
+        if (rawCount === 0 && offset > 0) {
+          pendingReset = true;
+        }
+
+        if (!pendingReset) {
+          offset = nextOffset;
+        }
       }
 
       if (options.onBetweenPages) {
         const action = await options.onBetweenPages();
         if (action === true) return;
         if (action === 'reset') {
-          // Caller signals Discord's search results shifted (e.g. a
-          // purge deleted matching messages). Restart at offset=0 of
-          // the current query without clearing `seen` — messages we've
-          // already yielded shouldn't be reprocessed if they happen to
-          // reappear in the restarted page's context.
+          // Legacy explicit-reset hook. Kept as a safety hatch for
+          // callers (and tests) that want manual reset control. The
+          // iterator self-detects shifts via total_results so most
+          // consumers no longer need this.
           offset = 0;
+          pendingReset = false;
         }
       }
     }
