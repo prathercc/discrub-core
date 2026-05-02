@@ -1487,6 +1487,63 @@ describe('DiscordService', () => {
       expect(dataPages[0].messages).toHaveLength(25);
       expect(dataPages[1].messages).toHaveLength(5);
     });
+
+    it('terminates when consecutive pages are fully dedup-filtered (rawCount > 0, pageMessages = 0)', async () => {
+      // Real-world case from a #148 verification HAR: after walking all
+      // matches, Discord kept returning the same 5 already-seen system
+      // messages forever. rawCount=5 but every entry was in `seen`,
+      // so pageMessages=0. Termination must count consecutive
+      // zero-NEW-unique pages, not just rawCount=0 pages.
+      const recurringMessages = [
+        makeMessage('a'),
+        makeMessage('b'),
+        makeMessage('c'),
+        makeMessage('d'),
+        makeMessage('e'),
+      ];
+      let callCount = 0;
+      vi.stubGlobal('fetch', vi.fn(async () => {
+        callCount++;
+        if (callCount === 1) {
+          // First page yields the 5 messages — all become "seen".
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              messages: recurringMessages.map((m) => [m]),
+              total_results: 5,
+            }),
+          };
+        }
+        // Subsequent pages return the same 5 messages — Discord's index
+        // hasn't acknowledged that they're still here / can't be deleted.
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            messages: recurringMessages.map((m) => [m]),
+            total_results: 5,
+          }),
+        };
+      }));
+
+      const pages: any[] = [];
+      for await (const page of service.iterateSearchResults({
+        token: testAuth,
+        channelId: testChannelId,
+        guildId: testGuildId,
+        criteria: baseSearchCriteria,
+      })) {
+        pages.push(page);
+      }
+
+      // First page yielded the 5 messages; subsequent fully-dedup'd pages
+      // each had pageMessages.length=0. Terminator fires at threshold=2.
+      const yieldedMessages = pages.flatMap((p) => p.messages);
+      expect(yieldedMessages).toHaveLength(5);
+      // Should be at most a few calls — not an infinite loop.
+      expect(callCount).toBeLessThan(10);
+    });
   });
 
   describe('Snowflake Generation', () => {

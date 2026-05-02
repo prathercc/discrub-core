@@ -510,10 +510,16 @@ class DiscordService {
       // that case.
       if (totalResults === 0 && pageMessages.length === 0 && pageIndex === 1) return;
 
-      // Termination rule: two consecutive raw-empty pages. Replaces the
-      // unsafe "rawCount < page size = done" heuristic that Discord's docs
-      // explicitly warn against.
-      if (rawCount === 0) {
+      // Termination rule: two consecutive pages with zero NEW unique
+      // messages. Counts both truly-empty pages (rawCount=0) AND pages
+      // where every entry was already in `seen` (Discord re-served the
+      // same already-yielded results). Replaces the unsafe "rawCount <
+      // page size = done" heuristic that Discord's docs explicitly warn
+      // against, and avoids an infinite loop when a fully-dedup'd page
+      // would otherwise fail the rawCount=0 check (e.g., when search
+      // keeps returning thread-starter system messages the consumer
+      // can't delete).
+      if (pageMessages.length === 0) {
         consecutiveEmptyPages++;
         if (consecutiveEmptyPages >= EMPTY_PAGE_TERMINATE_THRESHOLD) return;
       } else {
