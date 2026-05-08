@@ -233,9 +233,24 @@ export class MessageFetchService {
   }
 
   /**
-   * Resolves reactions for search messages (fetches fresh reaction data)
+   * Resolves reactions for messages whose `reactions` field is unpopulated
+   * (typically the result of Discord's search endpoint, which omits the
+   * field). For each input message, fetches a `?around=<id>` window of
+   * surrounding messages — those carry reactions inline — and merges
+   * them into a `trackMap` keyed by message ID. Within-pass dedup means
+   * clustered hits collapse to far fewer Discord calls than messages.
+   *
+   * Returns a new message array. Messages not pulled into any
+   * around-window end up with `reactions: undefined`. Honors
+   * `config.shouldStop` for cooperative cancellation; on early break,
+   * partially-populated entries are still returned.
+   *
+   * Public so consumers paginating search results page-by-page (where
+   * the public `fetchMessages` entry's full-walk loop is not a fit) can
+   * apply Pass 1 enrichment per page without re-implementing the
+   * around-window dedup.
    */
-  private async resolveMessageReactions(messages: Message[]): Promise<Message[]> {
+  async resolveMessageReactions(messages: Message[]): Promise<Message[]> {
     const trackMap: Record<string, Reaction[]> = {};
 
     for (const [i, message] of messages.entries()) {

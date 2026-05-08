@@ -567,4 +567,109 @@ describe('MessageFetchService', () => {
       expect(result.threads).toEqual([]);
     });
   });
+
+  describe('resolveMessageReactions (public Pass 1 surface)', () => {
+    // The discrub web app paginates search results page-by-page and needs
+    // to enrich reactions per page (the public `fetchMessages` runs full
+    // pagination internally, which is the wrong shape). The previously
+    // private `resolveMessageReactions` was promoted to public to support
+    // that consumer. These tests pin the public contract.
+
+    it('populates Message.reactions from the around-window response', async () => {
+      service = new MessageFetchService(mockConfig);
+      const inputs = [createMsg('m1', 'c1'), createMsg('m2', 'c1')];
+
+      mockApiClient.fetchMessageData.mockImplementation(
+        async (_token: string, messageId: string) => ({
+          success: true,
+          data: [
+            {
+              ...createMsg(messageId, 'c1'),
+              reactions: [{ emoji: { id: null, name: '👍' }, count: 1 }],
+            },
+          ],
+        }),
+      );
+
+      const result = await service.resolveMessageReactions(inputs);
+
+      expect(result).toHaveLength(2);
+      expect(result[0].reactions).toEqual([{ emoji: { id: null, name: '👍' }, count: 1 }]);
+      expect(result[1].reactions).toEqual([{ emoji: { id: null, name: '👍' }, count: 1 }]);
+    });
+
+    it('uses the around query parameter on each per-message lookup', async () => {
+      service = new MessageFetchService(mockConfig);
+      const inputs = [createMsg('m1', 'c1')];
+
+      mockApiClient.fetchMessageData.mockResolvedValue({
+        success: true,
+        data: [{ ...createMsg('m1', 'c1'), reactions: [] }],
+      });
+
+      await service.resolveMessageReactions(inputs);
+
+      expect(mockApiClient.fetchMessageData).toHaveBeenCalledWith(
+        'test-token',
+        'm1',
+        'c1',
+        'around',
+      );
+    });
+
+    it('deduplicates within-pass via the trackMap', async () => {
+      // If the around-window for m1 already pulls back m2 with reactions,
+      // m2 should not trigger a second around-call.
+      service = new MessageFetchService(mockConfig);
+      const inputs = [createMsg('m1', 'c1'), createMsg('m2', 'c1')];
+
+      mockApiClient.fetchMessageData.mockResolvedValueOnce({
+        success: true,
+        data: [
+          { ...createMsg('m1', 'c1'), reactions: [{ emoji: { id: null, name: '👍' }, count: 1 }] },
+          { ...createMsg('m2', 'c1'), reactions: [{ emoji: { id: null, name: '❤️' }, count: 2 }] },
+        ],
+      });
+
+      const result = await service.resolveMessageReactions(inputs);
+
+      expect(mockApiClient.fetchMessageData).toHaveBeenCalledTimes(1);
+      expect(result[0].reactions).toEqual([{ emoji: { id: null, name: '👍' }, count: 1 }]);
+      expect(result[1].reactions).toEqual([{ emoji: { id: null, name: '❤️' }, count: 2 }]);
+    });
+
+    it('honors shouldStop and returns partial enrichment on early break', async () => {
+      let calls = 0;
+      mockConfig.shouldStop = vi.fn().mockImplementation(async () => {
+        calls += 1;
+        return calls > 1;
+      });
+      service = new MessageFetchService(mockConfig);
+      const inputs = [createMsg('m1', 'c1'), createMsg('m2', 'c1')];
+
+      mockApiClient.fetchMessageData.mockResolvedValue({
+        success: true,
+        data: [{ ...createMsg('m1', 'c1'), reactions: [{ emoji: { id: null, name: '👍' }, count: 1 }] }],
+      });
+
+      const result = await service.resolveMessageReactions(inputs);
+
+      expect(mockApiClient.fetchMessageData).toHaveBeenCalledTimes(1);
+      expect(result).toHaveLength(2);
+      expect(result[0].reactions).toEqual([{ emoji: { id: null, name: '👍' }, count: 1 }]);
+      expect(result[1].reactions).toBeUndefined();
+    });
+
+    it('returns reactions=undefined for messages whose around-fetch failed', async () => {
+      service = new MessageFetchService(mockConfig);
+      const inputs = [createMsg('m1', 'c1')];
+
+      mockApiClient.fetchMessageData.mockResolvedValue({ success: false, data: null });
+
+      const result = await service.resolveMessageReactions(inputs);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].reactions).toBeUndefined();
+    });
+  });
 });
