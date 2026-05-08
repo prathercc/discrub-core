@@ -211,6 +211,53 @@ describe('DiscordService', () => {
         expect(result.success).toBe(true);
       });
     });
+
+    // PUT helper landed alongside addReaction + pinMessage as the
+    // counterpart to existing post/patch/delete. Same withRetry path
+    // (429 backoff transparent), no auto-applied withDelay because
+    // typical callers loop with their own pacing.
+    describe('PUT requests', () => {
+      it('should make PUT request with correct headers (no body)', async () => {
+        const mockFetch = mockFetchSuccess(undefined);
+        vi.stubGlobal('fetch', mockFetch);
+
+        await service.pinMessage(testAuth, testChannelId, testMessageId);
+
+        expect(mockFetch).toHaveBeenCalledWith(
+          `${service.DISCORD_CHANNELS_ENDPOINT}/${testChannelId}/pins/${testMessageId}`,
+          expect.objectContaining({
+            method: 'PUT',
+            headers: expect.objectContaining({
+              authorization: testAuth,
+            }),
+          })
+        );
+      });
+
+      it('should return success: true on 204 PUT (typical for pins / reactions)', async () => {
+        vi.stubGlobal('fetch', mockFetchSuccess(undefined));
+
+        const result = await service.pinMessage(testAuth, testChannelId, testMessageId);
+
+        expect(result.success).toBe(true);
+      });
+
+      it('should surface success: false / status 403 (e.g. 50-pin cap)', async () => {
+        const mockFetch = vi.fn(() =>
+          Promise.resolve({
+            ok: false,
+            status: 403,
+            json: async () => ({ message: 'Maximum number of pins reached' }),
+          } as unknown as Response)
+        );
+        vi.stubGlobal('fetch', mockFetch);
+
+        const result = await service.pinMessage(testAuth, testChannelId, testMessageId);
+
+        expect(result.success).toBe(false);
+        expect(result.status).toBe(403);
+      });
+    });
   });
 
   describe('Rate Limiting (429 Handling)', () => {
@@ -530,6 +577,63 @@ describe('DiscordService', () => {
   });
 
   describe('Message Operations', () => {
+    // postMessage covers the create-message endpoint added alongside
+    // the discrub-web seed-messages dev tool. Plain content + reply
+    // shape both exercised here so future reorganization of
+    // MessageCreate doesn't silently drop the message_reference path.
+    describe('postMessage', () => {
+      it('POSTs to the channel messages endpoint with the body', async () => {
+        const created = { id: 'm-new', channel_id: testChannelId, content: 'hi' };
+        const mockFetch = mockFetchSuccess(created);
+        vi.stubGlobal('fetch', mockFetch);
+
+        const result = await service.postMessage(testAuth, testChannelId, { content: 'hi' });
+
+        expect(result.success).toBe(true);
+        expect(result.data).toEqual(created);
+        expect(mockFetch).toHaveBeenCalledWith(
+          `${service.DISCORD_CHANNELS_ENDPOINT}/${testChannelId}/messages`,
+          expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ content: 'hi' }),
+          })
+        );
+      });
+
+      it('serializes message_reference for replies', async () => {
+        const mockFetch = mockFetchSuccess({ id: 'r1', channel_id: testChannelId, content: 'reply' });
+        vi.stubGlobal('fetch', mockFetch);
+
+        await service.postMessage(testAuth, testChannelId, {
+          content: 'reply',
+          message_reference: {
+            message_id: 'parent-id',
+            channel_id: testChannelId,
+            fail_if_not_exists: false,
+          },
+        });
+
+        const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+        expect(body.message_reference.message_id).toBe('parent-id');
+        expect(body.message_reference.fail_if_not_exists).toBe(false);
+      });
+
+      it('surfaces non-2xx with success: false and status', async () => {
+        vi.stubGlobal('fetch', vi.fn(() =>
+          Promise.resolve({
+            ok: false,
+            status: 403,
+            json: async () => ({ message: 'Missing Permissions' }),
+          } as unknown as Response)
+        ));
+
+        const result = await service.postMessage(testAuth, testChannelId, { content: 'no' });
+
+        expect(result.success).toBe(false);
+        expect(result.status).toBe(403);
+      });
+    });
+
     it('should fetch messages with default parameters', async () => {
       const mockMessages = createMockMessages(10);
       vi.stubGlobal('fetch', mockFetchSuccess(mockMessages));
@@ -1692,6 +1796,27 @@ describe('DiscordService', () => {
   });
 
   describe('Reaction Operations', () => {
+    // addReaction PUTs to the @me reactions endpoint. Emoji must be
+    // URL-encoded — verified explicitly here because forgetting the
+    // encode silently corrupts unicode emojis (the request goes
+    // through but reacts with a different character).
+    describe('addReaction', () => {
+      it('PUTs to the @me reactions endpoint', async () => {
+        const mockFetch = mockFetchSuccess(undefined);
+        vi.stubGlobal('fetch', mockFetch);
+
+        await service.addReaction(testAuth, testChannelId, testMessageId, '👍');
+
+        expect(mockFetch).toHaveBeenCalledWith(
+          expect.stringContaining(`/messages/${testMessageId}/reactions/`),
+          expect.objectContaining({ method: 'PUT' })
+        );
+        const calledUrl = mockFetch.mock.calls[0][0] as string;
+        expect(calledUrl).toContain(encodeURIComponent('👍'));
+        expect(calledUrl).toContain('@me');
+      });
+    });
+
     it('should get reactions for emoji', async () => {
       const mockUsers = [mockUser];
       vi.stubGlobal('fetch', mockFetchSuccess(mockUsers));

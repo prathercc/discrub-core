@@ -13,6 +13,7 @@ import {
   GuildChannelModify,
   GuildMemberObject,
   Message,
+  MessageCreate,
   MessageModify,
   Role,
   SearchMessageResult,
@@ -152,6 +153,27 @@ class DiscordService {
     );
   }
 
+  /**
+   * PUT helper. Like `post`, this stays out of the `withDelay` flow —
+   * the put-based public methods (addReaction, pinMessage) are expected
+   * to be called from loops that already pace themselves externally
+   * (see the seed-messages dev tool in discrub-web). withRetry still
+   * runs so 429s are handled transparently.
+   */
+  private async put<T = void>(
+    url: string,
+    authorization: string,
+    body?: unknown,
+  ): Promise<DiscordApiResponse<T>> {
+    return this.withRetry<T>(() =>
+      fetch(url, {
+        method: "PUT",
+        headers: this.getHeaders(authorization),
+        body: body ? JSON.stringify(body) : undefined,
+      }),
+    );
+  }
+
   private async patch<T>(
     url: string,
     authorization: string,
@@ -257,6 +279,26 @@ class DiscordService {
       updateProps,
     );
 
+  /**
+   * Post a new message to a channel.
+   * POST /channels/{channelId}/messages
+   *
+   * Does not auto-apply the delete-delay (unlike editMessage /
+   * deleteMessage) because the typical caller is a loop that paces
+   * itself externally. withRetry still runs so 429 responses are
+   * handled transparently.
+   */
+  postMessage = (
+    authorization: string,
+    channelId: string,
+    body: MessageCreate,
+  ) =>
+    this.post<Message>(
+      `${this.DISCORD_CHANNELS_ENDPOINT}/${channelId}/messages`,
+      authorization,
+      body,
+    );
+
   deleteMessage = (
     authorization: string,
     messageId: string,
@@ -264,6 +306,23 @@ class DiscordService {
   ) =>
     this.delete(
       `${this.DISCORD_CHANNELS_ENDPOINT}/${channelId}/messages/${messageId}`,
+      authorization,
+    );
+
+  /**
+   * Pin a message in a channel. Discord caps pinned messages at 50
+   * per channel — beyond that, this returns success: false / status
+   * 403, which callers should treat as an expected outcome rather
+   * than a fatal error.
+   * PUT /channels/{channelId}/pins/{messageId}
+   */
+  pinMessage = (
+    authorization: string,
+    channelId: string,
+    messageId: string,
+  ) =>
+    this.put(
+      `${this.DISCORD_CHANNELS_ENDPOINT}/${channelId}/pins/${messageId}`,
       authorization,
     );
 
@@ -713,6 +772,27 @@ class DiscordService {
   ) =>
     this.delete(
       `${this.DISCORD_CHANNELS_ENDPOINT}/${channelId}/messages/${messageId}/reactions/${emoji}/${userId}`,
+      authorization,
+    );
+
+  /**
+   * Add the current user's reaction to a message.
+   *
+   * `emoji` should be either a unicode character (e.g. "👍") or a
+   * custom emoji identifier in `name:id` form. The endpoint expects
+   * the emoji URL-encoded; we encode here so callers pass the raw
+   * value.
+   *
+   * PUT /channels/{channelId}/messages/{messageId}/reactions/{emoji}/@me
+   */
+  addReaction = (
+    authorization: string,
+    channelId: string,
+    messageId: string,
+    emoji: string,
+  ) =>
+    this.put(
+      `${this.DISCORD_CHANNELS_ENDPOINT}/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}/@me`,
       authorization,
     );
 

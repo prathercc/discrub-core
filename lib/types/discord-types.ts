@@ -23,6 +23,7 @@ export type { InstallParamsObject } from "./discord/install-params-object";
 export type { Message } from "./discord/message";
 export type { MessageActivityObject } from "./discord/message-activity-object";
 export type { MessageModify } from "./discord/message-modify";
+export type { MessageCreate } from "./discord/message-create";
 export type { MessageCallObject } from "./discord/message-call-object";
 export type { MessageInteractionObject } from "./discord/message-interaction-object";
 export type { MessageReferenceObject } from "./discord/message-reference-object";
