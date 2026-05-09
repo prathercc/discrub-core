@@ -18,6 +18,16 @@ export type SearchIterationPage = {
    * Callers can surface this (e.g. status-log note) or ignore it.
    */
   crossedQueryBoundary: boolean;
+  /**
+   * True when this is a synthetic final yield emitted because the iterator
+   * is terminating with `aggregatedCount` substantially less than
+   * `totalResults` (Discord stopped serving new matches before the
+   * reported total was exhausted — typically search-index churn or a
+   * hidden offset cap). Always undefined / false on regular pages.
+   * Carries `messages: []`. Callers SHOULD surface a warning to the user
+   * when set so silent data loss becomes visible.
+   */
+  incomplete?: boolean;
 };
 
 export type SearchIterationOptions = {
@@ -48,4 +58,26 @@ export type SearchIterationOptions = {
   onBetweenPages?: () => Promise<boolean | 'reset' | void> | boolean | 'reset' | void;
   /** Synchronous cancel probe — checked before each request. */
   shouldStop?: () => boolean | Promise<boolean>;
+  /**
+   * Whether two consecutive zero-NEW-unique pages terminate the
+   * iterator. Default `true` — appropriate for **mutating consumers**
+   * (purge): when Discord re-serves the same already-seen messages
+   * (e.g. type-21 thread starters that can't be deleted), the
+   * iterator must stop or it loops forever. See #148 in the consumer
+   * repo for the original bug this rule fixes.
+   *
+   * Set `false` for **read-only consumers** (bulk export): they yield
+   * each unique message once and never re-encounter it, so dedup-empty
+   * pages mean Discord's index hit a wall (eventual-consistency lag,
+   * undocumented offset cap), NOT that the iterator is done. With
+   * `false`, the iterator keeps trying via offset advances + resets
+   * until either `aggregatedCount` reaches `totalResults` or the
+   * safety valve fires (5 consecutive resets that don't advance
+   * `aggregatedCount`). When the safety valve fires, the iterator
+   * yields one final page with `incomplete: true` before returning,
+   * so the caller can surface a warning.
+   *
+   * Default of `true` keeps existing callers' behavior unchanged.
+   */
+  terminateOnDedupEmpty?: boolean;
 };

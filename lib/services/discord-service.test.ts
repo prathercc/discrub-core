@@ -1648,6 +1648,217 @@ describe('DiscordService', () => {
       // Should be at most a few calls — not an infinite loop.
       expect(callCount).toBeLessThan(10);
     });
+
+    describe('terminateOnDedupEmpty: false (read-only / bulk-export mode)', () => {
+      // When the caller opts out of the dedup-empty terminator, the
+      // iterator must keep trying past dedup-empty pages until it has
+      // yielded everything `total_results` claims exists OR the
+      // wasted-resets safety valve fires. This is the bulk-export use
+      // case — the caller doesn't mutate Discord state, so dedup-empty
+      // pages mean Discord-side index churn, not iterator end-state.
+
+      it('keeps walking past a dedup-empty page when aggregatedCount < totalResults', async () => {
+        // Yield 25 messages on page 1, then a dedup-empty page (Discord
+        // returned the same 25 again — fully dedup'd), then a fresh page
+        // with 25 NEW messages. Default mode would terminate after 2
+        // dedup-empties; non-default must keep going.
+        const firstBatch = Array.from({ length: 25 }, (_, i) => makeMessage(`a${i}`));
+        const secondBatch = Array.from({ length: 25 }, (_, i) => makeMessage(`b${i}`));
+        let callCount = 0;
+        vi.stubGlobal('fetch', vi.fn(async () => {
+          callCount++;
+          if (callCount === 1) {
+            return { ok: true, status: 200, json: async () => ({ messages: firstBatch.map((m) => [m]), total_results: 200 }) };
+          }
+          if (callCount === 2) {
+            // Same 25 — fully dedup'd against `seen`. In default mode
+            // this would start the empty-pages counter; here we expect
+            // the iterator to continue.
+            return { ok: true, status: 200, json: async () => ({ messages: firstBatch.map((m) => [m]), total_results: 200 }) };
+          }
+          if (callCount === 3) {
+            return { ok: true, status: 200, json: async () => ({ messages: secondBatch.map((m) => [m]), total_results: 200 }) };
+          }
+          // Walk past totalResults — empty.
+          return { ok: true, status: 200, json: async () => ({ messages: [], total_results: 200 }) };
+        }));
+
+        const pages: any[] = [];
+        for await (const page of service.iterateSearchResults({
+          token: testAuth,
+          channelId: testChannelId,
+          guildId: testGuildId,
+          criteria: baseSearchCriteria,
+          terminateOnDedupEmpty: false,
+        })) {
+          pages.push(page);
+        }
+
+        const yielded = pages.flatMap((p) => p.messages);
+        expect(yielded).toHaveLength(50);
+        // Confirm we did NOT terminate after the dedup-empty page (default would).
+        expect(callCount).toBeGreaterThanOrEqual(3);
+      });
+
+      it('terminates cleanly when aggregatedCount reaches totalResults', async () => {
+        // No incomplete flag should appear when termination is clean.
+        const allMatches = Array.from({ length: 50 }, (_, i) => makeMessage(String(i)));
+        let callCount = 0;
+        vi.stubGlobal('fetch', vi.fn(async () => {
+          callCount++;
+          if (callCount === 1) {
+            return { ok: true, status: 200, json: async () => ({ messages: allMatches.slice(0, 25).map((m) => [m]), total_results: 50 }) };
+          }
+          if (callCount === 2) {
+            return { ok: true, status: 200, json: async () => ({ messages: allMatches.slice(25, 50).map((m) => [m]), total_results: 50 }) };
+          }
+          // Should not be reached — iterator should terminate at aggregatedCount === totalResults.
+          return { ok: true, status: 200, json: async () => ({ messages: [], total_results: 50 }) };
+        }));
+
+        const pages: any[] = [];
+        for await (const page of service.iterateSearchResults({
+          token: testAuth,
+          channelId: testChannelId,
+          guildId: testGuildId,
+          criteria: baseSearchCriteria,
+          terminateOnDedupEmpty: false,
+        })) {
+          pages.push(page);
+        }
+
+        const yielded = pages.flatMap((p) => p.messages);
+        expect(yielded).toHaveLength(50);
+        expect(callCount).toBe(2);
+        // No incomplete flag — clean termination.
+        expect(pages.some((p) => p.incomplete)).toBe(false);
+      });
+
+      it('safety valve fires after 5 wasted resets and emits incomplete=true', async () => {
+        // Reproduce the #169 wall: yield 500 messages, then Discord stops
+        // serving anything new. Each empty-at-non-zero-offset triggers
+        // pendingReset; subsequent reset hits offset=0 with all dedup'd.
+        // Without the safety valve this would loop forever.
+        const yielded500 = Array.from({ length: 500 }, (_, i) => makeMessage(`m${i}`));
+        let callCount = 0;
+        vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+          callCount++;
+          // Cap test loops — if we don't terminate we'd be stuck here.
+          if (callCount > 100) {
+            return { ok: true, status: 200, json: async () => ({ messages: [], total_results: 2311 }) };
+          }
+          // First 20 calls advance offset 0..475 yielding 25 msgs each.
+          if (callCount <= 20) {
+            const start = (callCount - 1) * 25;
+            return { ok: true, status: 200, json: async () => ({
+              messages: yielded500.slice(start, start + 25).map((m) => [m]),
+              total_results: 2311,
+            }) };
+          }
+          // Beyond: alternate between rawCount=0 at non-zero offset
+          // (triggers reset) and dedup'd page at offset=0 (no progress).
+          // Both produce pageMessages=0 but only the offset>0 path
+          // increments pendingReset. The wastedResets safety valve must
+          // fire within 5 such cycles.
+          if (url.includes('offset=')) {
+            return { ok: true, status: 200, json: async () => ({ messages: [], total_results: 2311 }) };
+          }
+          // offset=0 (after pendingReset): return the same 500 dedup'd.
+          return { ok: true, status: 200, json: async () => ({
+            messages: yielded500.slice(0, 25).map((m) => [m]),
+            total_results: 2311,
+          }) };
+        }));
+
+        const pages: any[] = [];
+        for await (const page of service.iterateSearchResults({
+          token: testAuth,
+          channelId: testChannelId,
+          guildId: testGuildId,
+          criteria: baseSearchCriteria,
+          terminateOnDedupEmpty: false,
+        })) {
+          pages.push(page);
+        }
+
+        const yielded = pages.flatMap((p) => p.messages);
+        // We yielded all 500 from the initial walk.
+        expect(yielded).toHaveLength(500);
+        // Did NOT hit the test-loop emergency cap (would be > 100 calls).
+        expect(callCount).toBeLessThan(50);
+        // Final synthetic page carries incomplete=true with the right count gap.
+        const finalPage = pages[pages.length - 1];
+        expect(finalPage.incomplete).toBe(true);
+        expect(finalPage.aggregatedCount).toBe(500);
+        expect(finalPage.totalResults).toBe(2311);
+        expect(finalPage.messages).toHaveLength(0);
+      });
+
+      it('does not emit incomplete flag when totalResults is below the noise floor', async () => {
+        // Tiny match sets (totalResults <= 100) suppress the incomplete
+        // flag — Discord-side jitter on small counts is normal and
+        // doesn't merit a user-facing warning.
+        const tiny = Array.from({ length: 30 }, (_, i) => makeMessage(`t${i}`));
+        let callCount = 0;
+        vi.stubGlobal('fetch', vi.fn(async () => {
+          callCount++;
+          if (callCount === 1) {
+            return { ok: true, status: 200, json: async () => ({ messages: tiny.map((m) => [m]), total_results: 90 }) };
+          }
+          // Keep returning the same 30 — dedup-empty path. Without the
+          // safety valve and noise floor, we'd loop; with both, we
+          // terminate, but no incomplete flag.
+          return { ok: true, status: 200, json: async () => ({ messages: tiny.map((m) => [m]), total_results: 90 }) };
+        }));
+
+        const pages: any[] = [];
+        for await (const page of service.iterateSearchResults({
+          token: testAuth,
+          channelId: testChannelId,
+          guildId: testGuildId,
+          criteria: baseSearchCriteria,
+          terminateOnDedupEmpty: false,
+        })) {
+          pages.push(page);
+        }
+
+        // Below the noise floor (totalResults=90), so no incomplete.
+        expect(pages.some((p) => p.incomplete)).toBe(false);
+        // Still terminated (didn't infinite-loop) thanks to the safety valve.
+        expect(callCount).toBeLessThan(50);
+      });
+
+      it('default mode (terminateOnDedupEmpty omitted) preserves the legacy 2-page terminator', async () => {
+        // Sanity check the default path with the new option present in
+        // the lib. Same shape as the existing
+        // "terminates when consecutive pages are fully dedup-filtered"
+        // test, but explicitly omitting the flag to confirm default.
+        const recurring = Array.from({ length: 5 }, (_, i) => makeMessage(`r${i}`));
+        let callCount = 0;
+        vi.stubGlobal('fetch', vi.fn(async () => {
+          callCount++;
+          return { ok: true, status: 200, json: async () => ({
+            messages: recurring.map((m) => [m]),
+            total_results: 5,
+          }) };
+        }));
+
+        const pages: any[] = [];
+        for await (const page of service.iterateSearchResults({
+          token: testAuth,
+          channelId: testChannelId,
+          guildId: testGuildId,
+          criteria: baseSearchCriteria,
+          // terminateOnDedupEmpty omitted -> defaults to true.
+        })) {
+          pages.push(page);
+        }
+
+        const yielded = pages.flatMap((p) => p.messages);
+        expect(yielded).toHaveLength(5);
+        expect(callCount).toBeLessThan(10);
+      });
+    });
   });
 
   describe('Snowflake Generation', () => {

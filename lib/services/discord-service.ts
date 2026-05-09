@@ -477,6 +477,20 @@ class DiscordService {
     const MAX_PER_QUERY = 5000;
     const EMPTY_PAGE_TERMINATE_THRESHOLD = 2;
     const RETRY_AFTER_DEFAULT_SECONDS = 1;
+    // Safety valve when terminateOnDedupEmpty is false. After this
+    // many consecutive resets-without-progress the iterator gives up,
+    // protecting against Discord serving zero new matches forever
+    // despite total_results claiming more remain.
+    const MAX_WASTED_RESETS = 5;
+    // Threshold below which we consider an early termination
+    // "incomplete" enough to warrant a synthetic final-yield with the
+    // incomplete flag. 5% slack absorbs Discord-side total_results
+    // jitter; the >100 floor suppresses noise on tiny match sets where
+    // a few-message gap is normal.
+    const INCOMPLETE_RATIO_THRESHOLD = 0.95;
+    const INCOMPLETE_MIN_TOTAL = 100;
+
+    const terminateOnDedupEmpty = options.terminateOnDedupEmpty ?? true;
 
     let currentCriteria: SearchCriteria = { ...options.criteria };
     let offset = 0;
@@ -486,6 +500,13 @@ class DiscordService {
     let prevTotalResults: number | null = null;
     let pendingReset = false;
     let consecutiveEmptyPages = 0;
+    // Safety-valve state for terminateOnDedupEmpty=false. We count
+    // resets-back-to-offset=0 that didn't grow aggregatedCount since the
+    // last reset. Five such "wasted resets" indicate Discord truly
+    // won't serve more matches, so we bail to prevent an infinite loop.
+    let wastedResets = 0;
+    let aggregatedCountAtLastReset = 0;
+    let lastTotalResults = 0;
     const seen = new Set<string>();
 
     // User-supplied lower bound (snowflake form) for the cap-shift guard.
@@ -497,10 +518,44 @@ class DiscordService {
       ? this.generateSnowflake(options.criteria.searchAfterDate)
       : null;
 
+    // Helper: yield a synthetic final page with incomplete=true if we
+    // terminated substantially below totalResults (and the total is big
+    // enough to be meaningful). Caller reads the flag and surfaces a
+    // warning. No-op when termination was clean.
+    const maybeYieldIncomplete = function* (): Generator<SearchIterationPage, void, void> {
+      if (
+        lastTotalResults > INCOMPLETE_MIN_TOTAL &&
+        aggregatedCount < lastTotalResults * INCOMPLETE_RATIO_THRESHOLD
+      ) {
+        yield {
+          messages: [],
+          totalResults: lastTotalResults,
+          pageIndex,
+          aggregatedCount,
+          crossedQueryBoundary: false,
+          incomplete: true,
+        };
+      }
+    };
+
     while (true) {
       if (options.shouldStop && (await options.shouldStop())) return;
 
       if (pendingReset) {
+        // Count this reset against the safety valve only when it's a
+        // wasted one (aggregatedCount didn't grow since the prior
+        // reset). The reset still happens regardless — the counter
+        // just decides whether we trip the safety valve.
+        if (aggregatedCount === aggregatedCountAtLastReset) {
+          wastedResets++;
+          if (wastedResets >= MAX_WASTED_RESETS) {
+            yield* maybeYieldIncomplete();
+            return;
+          }
+        } else {
+          wastedResets = 0;
+          aggregatedCountAtLastReset = aggregatedCount;
+        }
         offset = 0;
         pendingReset = false;
       }
@@ -548,6 +603,7 @@ class DiscordService {
       aggregatedCount += pageMessages.length;
 
       const totalResults = searchResult.total_results ?? 0;
+      lastTotalResults = totalResults;
 
       // Yield every page (including the first, even if empty) so callers
       // can learn totalResults up-front.
@@ -569,20 +625,46 @@ class DiscordService {
       // that case.
       if (totalResults === 0 && pageMessages.length === 0 && pageIndex === 1) return;
 
-      // Termination rule: two consecutive pages with zero NEW unique
-      // messages. Counts both truly-empty pages (rawCount=0) AND pages
-      // where every entry was already in `seen` (Discord re-served the
-      // same already-yielded results). Replaces the unsafe "rawCount <
-      // page size = done" heuristic that Discord's docs explicitly warn
-      // against, and avoids an infinite loop when a fully-dedup'd page
-      // would otherwise fail the rawCount=0 check (e.g., when search
-      // keeps returning thread-starter system messages the consumer
-      // can't delete).
+      // Termination rule for mutating consumers (default): two
+      // consecutive pages with zero NEW unique messages. Counts both
+      // truly-empty pages (rawCount=0) AND pages where every entry was
+      // already in `seen` (Discord re-served already-yielded results).
+      // Required for purge — when Discord keeps re-serving thread-
+      // starter system messages the consumer can't delete, the iterator
+      // must stop or it loops forever (#148 in the consumer repo).
+      //
+      // Read-only consumers (bulk export) opt out via
+      // terminateOnDedupEmpty=false. They yield each unique message
+      // exactly once, so dedup-empty pages signal Discord-side issues
+      // (index churn, undocumented offset cap), not iterator end-state.
+      // Such consumers rely on aggregatedCount >= totalResults plus the
+      // wasted-resets safety valve for termination.
       if (pageMessages.length === 0) {
         consecutiveEmptyPages++;
-        if (consecutiveEmptyPages >= EMPTY_PAGE_TERMINATE_THRESHOLD) return;
+        if (consecutiveEmptyPages >= EMPTY_PAGE_TERMINATE_THRESHOLD) {
+          if (terminateOnDedupEmpty) {
+            yield* maybeYieldIncomplete();
+            return;
+          }
+          // Read-only consumer: don't give up on dedup-empty pages.
+          // Force a reset to offset=0 so Discord's index gets a chance
+          // to serve fresh matches from the top. The reset itself
+          // counts toward the wasted-resets safety valve — if reset
+          // also produces dedup-empty + advancing offset never grows
+          // aggregatedCount, the safety valve fires after 5 cycles.
+          pendingReset = true;
+          consecutiveEmptyPages = 0;
+        }
       } else {
         consecutiveEmptyPages = 0;
+      }
+
+      // Read-only consumers: also terminate when we've yielded every
+      // message Discord said exists. Without this, the iterator loops
+      // forever on a stable index past total_results.
+      if (!terminateOnDedupEmpty && totalResults > 0 && aggregatedCount >= totalResults) {
+        // No incomplete yield — this is a clean completion.
+        return;
       }
 
       // Cap-shift: hit the 5000-match per-query ceiling. Tighten max_id
