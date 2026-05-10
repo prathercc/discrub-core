@@ -5,6 +5,49 @@ All notable changes to `discrub-core` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-05-10
+
+### Added
+
+- **`terminateOnDedupEmpty?: boolean` option on `iterateSearchResults`**
+  (default `true` to preserve existing purge behavior). When `false`,
+  the iterator no longer terminates after two consecutive dedup-empty
+  pages; instead it keeps walking via offset advances + resets until
+  either `aggregatedCount` reaches `totalResults` or a safety valve
+  fires (5 consecutive resets that fail to advance the aggregated
+  count). On safety-valve trip the iterator yields one final synthetic
+  page with `incomplete: true` so the consumer can surface a clear
+  "stopped early" warning instead of silently producing partial data.
+  Read-only consumers (bulk export) should pass `false`; purge-style
+  consumers that delete and re-search should keep the default. Driven
+  by a real-world bulk export that stalled at 500 of 2,311 matches
+  with no warning.
+
+- **`MessageFetchService.resolveMessageReactions` is now public.**
+  Promotes the previously-private reaction-enrichment primitive so
+  consumers paginating search results page-by-page can apply reaction
+  enrichment to each page as it lands, without re-implementing the
+  AROUND-window dedup. Behavior is unchanged; internal callers (e.g.
+  `fetchMessages`) use the same code path. Five new tests pin the
+  public surface: AROUND-window population, per-call `?around=` use,
+  within-pass dedup via `trackMap`, `shouldStop` partial-enrichment
+  semantics, and the `reactions = undefined` outcome on a failed
+  AROUND fetch.
+
+- **`postMessage`, `addReaction`, `pinMessage` on `DiscordService`.**
+  Three Discord API methods that were missing from the lib but needed
+  by consumer code (Discrub's seed-messages dev tool). All three
+  route through the existing `withRetry` wrapper so 429 backoff is
+  transparent, matching the guarantee already provided by
+  `editMessage` / `deleteMessage`. `pinMessage` uses a new private
+  `put<T>` helper. `MessageCreate` is a new minimal type for the
+  create-message body (`content`, `message_reference`,
+  `allowed_mentions`, `tts`, `flags`); the surface stays narrow until
+  a consumer needs more. Tests cover the PUT path's typical 204
+  return and the 50-pin-cap 403, `postMessage` with both plain
+  content and reply shape, and `addReaction`'s URL-encoding of the
+  emoji.
+
 ## [1.0.1] - 2026-05-01
 
 ### Fixed
