@@ -5,6 +5,55 @@ All notable changes to `discrub-core` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] - 2026-05-15
+
+### Changed
+
+- **`iterateSearchResults` always cap-shifts (#186 + #188).** Every
+  iteration after the first sets `searchBeforeDate = oldestSeenTimestamp`,
+  narrowing the upper bound past everything yielded so far. Discord's
+  `max_id` is exclusive, so previously-yielded messages are structurally
+  unreachable on subsequent calls. Live-verified on a 9-channel purge
+  with 234 deletes and 41 skips and zero anomalies; every channel's
+  per-batch tally exactly matches Discord's `total_results`.
+
+- User-supplied `searchAfterDate` becomes a hard lower bound: when the
+  cap-shift snowflake would drop to or below it, the iterator
+  terminates cleanly instead of issuing a wasted call.
+
+### Removed
+
+- **`terminateOnDedupEmpty?: boolean` option** (added in 1.0.2) is no
+  longer needed and has been removed. The new unconditional cap-shift
+  rule subsumes both behaviors: the consumer no longer has to pick
+  between "stop on dedup-empty" and "walk past it", because the
+  iterator can no longer produce a dedup-empty page in the first place
+  (the bound shrinks every iteration).
+
+- **`crossedQueryBoundary` field on `SearchIterationPage`** is removed.
+  The cap-shift formulation makes the concept meaningless: the boundary
+  shifts on every iteration. Consumers that previously branched on this
+  field should treat every page as a cap-shifted page.
+
+- Internal five-flag pagination state (`offset`, `pendingReset`,
+  `consecutiveEmptyPages`, `wastedResets`, `prevTotalResults`) collapses
+  to one boundary advance per page plus a 2-consecutive-empty-response
+  terminator. The 5000-cap-cross branch and wasted-resets safety valve
+  are gone. The in-memory `seen` Set is gone.
+
+### Preserved
+
+- The incomplete-page synthetic yield (95% retention threshold above
+  100 totalResults) is preserved, so genuine Discord-side index churn
+  still surfaces an `incomplete: true` page that consumers can warn on.
+
+### Notes
+
+This release subsumes the #186 cap-shift-on-reset fix originally filed
+as a separate item: scorpihoe-420's 20,550-match channel that quit at
+98 deleted / 22 skipped is covered by the same advance-on-every-iteration
+rule that #188 introduced.
+
 ## [1.0.2] - 2026-05-10
 
 ### Added
