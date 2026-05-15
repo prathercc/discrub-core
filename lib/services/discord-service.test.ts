@@ -978,121 +978,9 @@ describe('DiscordService', () => {
       expect(pages[0].totalResults).toBe(3);
       expect(pages[0].pageIndex).toBe(0);
       expect(pages[0].aggregatedCount).toBe(3);
-      expect(pages[0].crossedQueryBoundary).toBe(false);
       expect(pages[1].messages).toEqual([]);
       expect(pages[2].messages).toEqual([]);
     });
-
-    it('deduplicates across context-overlap', async () => {
-      // Legacy behavior: Discord's response is `Message[][]` with each
-      // inner array historically including ±2 context messages. Per the
-      // current API docs surrounding context is no longer returned, but
-      // the dedup Set is harmless and protects against any future
-      // regression to context-bearing responses.
-      const msgA = makeMessage('a');
-      const msgB = makeMessage('b');
-      const msgC = makeMessage('c');
-      let callCount = 0;
-      vi.stubGlobal('fetch', vi.fn(async () => {
-        callCount++;
-        return {
-          ok: true,
-          status: 200,
-          json: async () =>
-            callCount === 1
-              ? {
-                  messages: [
-                    [msgA, msgB],
-                    [msgB, msgC], // overlaps on msgB
-                  ],
-                  total_results: 3,
-                }
-              : { messages: [], total_results: 3 },
-        };
-      }));
-
-      const pages: any[] = [];
-      for await (const page of service.iterateSearchResults({
-        token: testAuth,
-        channelId: testChannelId,
-        guildId: testGuildId,
-        criteria: baseSearchCriteria,
-      })) {
-        pages.push(page);
-      }
-
-      expect(pages[0].messages.map((m: any) => m.id)).toEqual(['a', 'b', 'c']);
-      expect(pages[0].aggregatedCount).toBe(3);
-    });
-
-    it('continues with searchBeforeDate (max_id) when offset crosses 5000 cap', async () => {
-      // Build 200 pages of 25 unique messages each (5000 total). After the
-      // cap, the iterator must restart at offset=0 with `searchBeforeDate`
-      // (max_id) tightened to the oldest seen — walking newest→oldest.
-      // The continuation query then returns a small tail, followed by
-      // empty pages to satisfy the new termination rule.
-      const calls: any[] = [];
-      let callNumber = 0;
-      const mockFetch = vi.fn(async (url: string) => {
-        calls.push(url);
-        callNumber++;
-        // First query: 200 full pages of 25 msgs (5000 total).
-        if (callNumber <= 200) {
-          const base = (callNumber - 1) * 25;
-          // Older as callNumber grows, to match newest-first search order.
-          const ts = new Date(Date.UTC(2025, 0, 1) - callNumber * 60_000).toISOString();
-          const msgs = Array.from({ length: 25 }, (_, i) =>
-            makeMessage(String(base + i), ts));
-          return {
-            ok: true,
-            status: 200,
-            json: async () => ({ messages: msgs.map((m) => [m]), total_results: 5100 }),
-          };
-        }
-        // Continuation query returns a small tail, then empties.
-        if (callNumber === 201) {
-          const tailTs = new Date(Date.UTC(2024, 0, 1)).toISOString();
-          const msgs = Array.from({ length: 3 }, (_, i) =>
-            makeMessage(`tail-${i}`, tailTs));
-          return {
-            ok: true,
-            status: 200,
-            json: async () => ({ messages: msgs.map((m) => [m]), total_results: 3 }),
-          };
-        }
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ messages: [], total_results: 3 }),
-        };
-      });
-      vi.stubGlobal('fetch', mockFetch);
-
-      const pages: any[] = [];
-      for await (const page of service.iterateSearchResults({
-        token: testAuth,
-        channelId: testChannelId,
-        guildId: testGuildId,
-        criteria: baseSearchCriteria,
-      })) {
-        pages.push(page);
-      }
-
-      // 200 full pages + 1 continuation page + 2 empty terminators.
-      expect(pages).toHaveLength(203);
-      expect(pages[0].crossedQueryBoundary).toBe(false);
-      expect(pages[199].crossedQueryBoundary).toBe(false);
-      // Page 201 (index 200) is the first after the 5000-cap restart.
-      expect(pages[200].crossedQueryBoundary).toBe(true);
-      // The cap-shift URL has max_id (snowflake from the searchBeforeDate
-      // boundary), NOT min_id — newest→oldest walk.
-      const capShiftUrl = calls[200];
-      expect(capShiftUrl).toContain('max_id=');
-      expect(capShiftUrl).not.toContain('min_id=');
-      expect(capShiftUrl).not.toContain('offset=');
-      // Aggregated across both queries (5000 + 3 unique).
-      expect(pages[200].aggregatedCount).toBe(5003);
-    }, 10000);
 
     it('propagates thrown errors from failed fetches', async () => {
       vi.stubGlobal('fetch', mockFetchError(401));
@@ -1233,106 +1121,6 @@ describe('DiscordService', () => {
       expect(callCount).toBeGreaterThanOrEqual(3);
     });
 
-    it('resets to offset=0 when total_results changes between pages (index reshuffle)', async () => {
-      // total_results dropping signals that matches have shifted (e.g.
-      // a mutating consumer just deleted some). Iterator restarts the
-      // current query window at offset=0 to surface the new top.
-      const calls: string[] = [];
-      let callCount = 0;
-      vi.stubGlobal('fetch', vi.fn(async (url: string) => {
-        calls.push(url);
-        callCount++;
-        if (callCount === 1) {
-          const msgs = Array.from({ length: 25 }, (_, i) => makeMessage(`a${i}`));
-          return {
-            ok: true,
-            status: 200,
-            json: async () => ({ messages: msgs.map((m) => [m]), total_results: 100 }),
-          };
-        }
-        if (callCount === 2) {
-          // total_results dropped — signals reshuffle.
-          const msgs = Array.from({ length: 25 }, (_, i) => makeMessage(`b${i}`));
-          return {
-            ok: true,
-            status: 200,
-            json: async () => ({ messages: msgs.map((m) => [m]), total_results: 75 }),
-          };
-        }
-        if (callCount === 3) {
-          // After reset, iterator should be at offset=0 — verify URL.
-          const msgs = Array.from({ length: 25 }, (_, i) => makeMessage(`c${i}`));
-          return {
-            ok: true,
-            status: 200,
-            json: async () => ({ messages: msgs.map((m) => [m]), total_results: 75 }),
-          };
-        }
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ messages: [], total_results: 75 }),
-        };
-      }));
-
-      const pages: any[] = [];
-      for await (const page of service.iterateSearchResults({
-        token: testAuth,
-        channelId: testChannelId,
-        guildId: testGuildId,
-        criteria: baseSearchCriteria,
-      })) {
-        pages.push(page);
-      }
-
-      // Pages 1 and 2 advance offset normally (0, 25). Page 3 resets to
-      // offset=0 because total_results shifted. Verify the URL carried
-      // offset=0 OR no offset query param at all.
-      const url3 = calls[2];
-      expect(url3).not.toContain('offset=25');
-      expect(url3).not.toContain('offset=50');
-    });
-
-    it('resets when an empty page lands at non-zero offset', async () => {
-      // Walking past the last match → empty page at advanced offset.
-      // Iterator should reset to offset=0 of the same query and check
-      // the new top before terminating, in case results shifted.
-      const calls: string[] = [];
-      let callCount = 0;
-      vi.stubGlobal('fetch', vi.fn(async (url: string) => {
-        calls.push(url);
-        callCount++;
-        if (callCount === 1) {
-          const msgs = Array.from({ length: 25 }, (_, i) => makeMessage(`p1-${i}`));
-          return {
-            ok: true,
-            status: 200,
-            json: async () => ({ messages: msgs.map((m) => [m]), total_results: 25 }),
-          };
-        }
-        // Empty at offset=25 → triggers reset to offset=0.
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ messages: [], total_results: 25 }),
-        };
-      }));
-
-      const pages: any[] = [];
-      for await (const page of service.iterateSearchResults({
-        token: testAuth,
-        channelId: testChannelId,
-        guildId: testGuildId,
-        criteria: baseSearchCriteria,
-      })) {
-        pages.push(page);
-      }
-
-      // Reset after empty-at-non-zero → next URL is offset=0.
-      const url3 = calls[2];
-      expect(url3 && !url3.includes('offset=25') && !url3.includes('offset=50')).toBe(true);
-    });
-
     it('handles 202 Accepted by sleeping retry_after and refetching', async () => {
       // Discord returns 202 when the entity isn't yet indexed.
       let callCount = 0;
@@ -1378,24 +1166,23 @@ describe('DiscordService', () => {
     });
 
     it('terminates cleanly when cap-shift would drop max_id ≤ user-supplied min_id', async () => {
-      // User specifies a lower bound (searchAfterDate). After hitting the
-      // cap, the iterator's new searchBeforeDate boundary lands AT the
-      // user's lower bound (oldest seen has the same timestamp as user's
-      // lower bound) — the guard fires with `<=` and terminates instead
-      // of issuing a search call against a collapsed window.
+      // User specifies a lower bound (searchAfterDate). After page 1
+      // yields messages at exactly the user's lower bound, the always-
+      // cap-shift model would set searchBeforeDate=oldestSeen on page 2,
+      // but the resulting snowflake equals userLowerBoundSnowflake. The
+      // guard fires with `<=` and terminates BEFORE issuing the second
+      // call — preventing a request against a collapsed window.
       const userLowerBound = new Date(Date.UTC(2025, 5, 1)); // June 1, 2025
       let callCount = 0;
       vi.stubGlobal('fetch', vi.fn(async () => {
         callCount++;
-        // First query: 200 pages of 25 unique msgs (5000 total) all
-        // timestamped at exactly the user's lower bound. After the cap,
-        // the new max_id snowflake equals userLowerBoundSnowflake → guard
-        // fires (`<=` comparison).
-        if (callCount <= 200) {
-          const base = (callCount - 1) * 25;
+        // Page 1: 25 messages all timestamped at exactly the user's
+        // lower bound. The cap-shift on page 2 would collapse the
+        // window, so the guard terminates after page 1.
+        if (callCount === 1) {
           const ts = userLowerBound.toISOString();
           const msgs = Array.from({ length: 25 }, (_, i) =>
-            makeMessage(String(base + i), ts));
+            makeMessage(String(i), ts));
           return {
             ok: true,
             status: 200,
@@ -1421,10 +1208,11 @@ describe('DiscordService', () => {
         pages.push(page);
       }
 
-      // 200 pages, then guard terminates cleanly without a 201st call.
-      expect(pages).toHaveLength(200);
-      expect(callCount).toBe(200);
-    }, 10000);
+      // Page 1 yielded; cap-shift guard fired on page 2 attempt → no call 2.
+      expect(pages).toHaveLength(1);
+      expect(callCount).toBe(1);
+      expect(pages[0].messages).toHaveLength(25);
+    });
 
     it('does not terminate when total_results=0 but messages are populated (test-mock edge)', async () => {
       // Initial-empty fast path requires BOTH total_results=0 AND
@@ -1468,59 +1256,6 @@ describe('DiscordService', () => {
       expect(pages[0].messages).toHaveLength(3);
       // Iterator continued past the data page to the empty terminator.
       expect(callCount).toBeGreaterThanOrEqual(3);
-    });
-
-    it('legacy onBetweenPages "reset" still resets offset (safety hatch)', async () => {
-      // The wrapper no longer uses this hook (the iterator self-detects
-      // via total_results), but we keep the API for tests + future
-      // consumers. Verify a manual 'reset' return still flips offset
-      // to 0 mid-walk.
-      const calls: string[] = [];
-      let callCount = 0;
-      vi.stubGlobal('fetch', vi.fn(async (url: string) => {
-        calls.push(url);
-        callCount++;
-        if (callCount === 1) {
-          // First page: 25 results so offset would advance to 25.
-          const msgs = Array.from({ length: 25 }, (_, i) => makeMessage(`a${i}`));
-          return {
-            ok: true,
-            status: 200,
-            json: async () => ({ messages: msgs.map((m) => [m]), total_results: 50 }),
-          };
-        }
-        // After the manual 'reset', offset should be 0 again — verify
-        // by URL inspection.
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({ messages: [], total_results: 50 }),
-        };
-      }));
-
-      let resetSent = false;
-      const pages: any[] = [];
-      for await (const page of service.iterateSearchResults({
-        token: testAuth,
-        channelId: testChannelId,
-        guildId: testGuildId,
-        criteria: baseSearchCriteria,
-        onBetweenPages: () => {
-          if (!resetSent) {
-            resetSent = true;
-            return 'reset';
-          }
-          return false;
-        },
-      })) {
-        pages.push(page);
-      }
-
-      // After the explicit 'reset', the second URL must NOT carry an
-      // advanced offset (=25). It should be at offset 0 (or no offset
-      // qs param, which means 0).
-      const url2 = calls[1];
-      expect(url2 && !url2.includes('offset=25')).toBe(true);
     });
 
     it('consecutive-empty counter resets on a non-empty page (no premature termination)', async () => {
@@ -1592,43 +1327,46 @@ describe('DiscordService', () => {
       expect(dataPages[1].messages).toHaveLength(5);
     });
 
-    it('terminates when consecutive pages are fully dedup-filtered (rawCount > 0, pageMessages = 0)', async () => {
-      // Real-world case from a #148 verification HAR: after walking all
-      // matches, Discord kept returning the same 5 already-seen system
-      // messages forever. rawCount=5 but every entry was in `seen`,
-      // so pageMessages=0. Termination must count consecutive
-      // zero-NEW-unique pages, not just rawCount=0 pages.
-      const recurringMessages = [
-        makeMessage('a'),
-        makeMessage('b'),
-        makeMessage('c'),
-        makeMessage('d'),
-        makeMessage('e'),
-      ];
+    it('always cap-shifts: page 2 onward carries max_id at the oldest yielded snowflake', async () => {
+      // The simplification's core invariant: there is no offset-based
+      // pagination. Every call after the first uses max_id derived
+      // from the oldest-yielded timestamp so far. This test verifies
+      // that contract by inspecting the URL sequence and confirming:
+      //   - call 1: no max_id (initial criteria)
+      //   - call 2+: max_id present, equals snowflake(oldest-seen-ts)
+      //   - offset never appears (or is always 0)
+      const olderTs = '2024-12-01T00:00:00.000Z';
+      const newerTs = '2025-06-01T00:00:00.000Z';
+      const calls: string[] = [];
       let callCount = 0;
-      vi.stubGlobal('fetch', vi.fn(async () => {
+      vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+        calls.push(url);
         callCount++;
         if (callCount === 1) {
-          // First page yields the 5 messages — all become "seen".
-          return {
-            ok: true,
-            status: 200,
-            json: async () => ({
-              messages: recurringMessages.map((m) => [m]),
-              total_results: 5,
-            }),
-          };
+          // Page 1: 3 messages with mixed timestamps (oldest = olderTs).
+          return { ok: true, status: 200, json: async () => ({
+            messages: [
+              [{ ...mockMessage, id: 'a', timestamp: newerTs }],
+              [{ ...mockMessage, id: 'b', timestamp: olderTs }],
+              [{ ...mockMessage, id: 'c', timestamp: newerTs }],
+            ],
+            total_results: 6,
+          })};
         }
-        // Subsequent pages return the same 5 messages — Discord's index
-        // hasn't acknowledged that they're still here / can't be deleted.
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({
-            messages: recurringMessages.map((m) => [m]),
-            total_results: 5,
-          }),
-        };
+        if (callCount === 2) {
+          // Page 2: more messages older than olderTs.
+          return { ok: true, status: 200, json: async () => ({
+            messages: [
+              [{ ...mockMessage, id: 'd', timestamp: '2024-01-01T00:00:00.000Z' }],
+            ],
+            total_results: 4,
+          })};
+        }
+        // Subsequent: empty. Triggers 2-empty terminator.
+        return { ok: true, status: 200, json: async () => ({
+          messages: [],
+          total_results: 4,
+        })};
       }));
 
       const pages: any[] = [];
@@ -1641,223 +1379,22 @@ describe('DiscordService', () => {
         pages.push(page);
       }
 
-      // First page yielded the 5 messages; subsequent fully-dedup'd pages
-      // each had pageMessages.length=0. Terminator fires at threshold=2.
-      const yieldedMessages = pages.flatMap((p) => p.messages);
-      expect(yieldedMessages).toHaveLength(5);
-      // Should be at most a few calls — not an infinite loop.
-      expect(callCount).toBeLessThan(10);
-    });
-
-    describe('terminateOnDedupEmpty: false (read-only / bulk-export mode)', () => {
-      // When the caller opts out of the dedup-empty terminator, the
-      // iterator must keep trying past dedup-empty pages until it has
-      // yielded everything `total_results` claims exists OR the
-      // wasted-resets safety valve fires. This is the bulk-export use
-      // case — the caller doesn't mutate Discord state, so dedup-empty
-      // pages mean Discord-side index churn, not iterator end-state.
-
-      it('keeps walking past a dedup-empty page when aggregatedCount < totalResults', async () => {
-        // Yield 25 messages on page 1, then a dedup-empty page (Discord
-        // returned the same 25 again — fully dedup'd), then a fresh page
-        // with 25 NEW messages. Default mode would terminate after 2
-        // dedup-empties; non-default must keep going.
-        const firstBatch = Array.from({ length: 25 }, (_, i) => makeMessage(`a${i}`));
-        const secondBatch = Array.from({ length: 25 }, (_, i) => makeMessage(`b${i}`));
-        let callCount = 0;
-        vi.stubGlobal('fetch', vi.fn(async () => {
-          callCount++;
-          if (callCount === 1) {
-            return { ok: true, status: 200, json: async () => ({ messages: firstBatch.map((m) => [m]), total_results: 200 }) };
-          }
-          if (callCount === 2) {
-            // Same 25 — fully dedup'd against `seen`. In default mode
-            // this would start the empty-pages counter; here we expect
-            // the iterator to continue.
-            return { ok: true, status: 200, json: async () => ({ messages: firstBatch.map((m) => [m]), total_results: 200 }) };
-          }
-          if (callCount === 3) {
-            return { ok: true, status: 200, json: async () => ({ messages: secondBatch.map((m) => [m]), total_results: 200 }) };
-          }
-          // Walk past totalResults — empty.
-          return { ok: true, status: 200, json: async () => ({ messages: [], total_results: 200 }) };
-        }));
-
-        const pages: any[] = [];
-        for await (const page of service.iterateSearchResults({
-          token: testAuth,
-          channelId: testChannelId,
-          guildId: testGuildId,
-          criteria: baseSearchCriteria,
-          terminateOnDedupEmpty: false,
-        })) {
-          pages.push(page);
-        }
-
-        const yielded = pages.flatMap((p) => p.messages);
-        expect(yielded).toHaveLength(50);
-        // Confirm we did NOT terminate after the dedup-empty page (default would).
-        expect(callCount).toBeGreaterThanOrEqual(3);
-      });
-
-      it('terminates cleanly when aggregatedCount reaches totalResults', async () => {
-        // No incomplete flag should appear when termination is clean.
-        const allMatches = Array.from({ length: 50 }, (_, i) => makeMessage(String(i)));
-        let callCount = 0;
-        vi.stubGlobal('fetch', vi.fn(async () => {
-          callCount++;
-          if (callCount === 1) {
-            return { ok: true, status: 200, json: async () => ({ messages: allMatches.slice(0, 25).map((m) => [m]), total_results: 50 }) };
-          }
-          if (callCount === 2) {
-            return { ok: true, status: 200, json: async () => ({ messages: allMatches.slice(25, 50).map((m) => [m]), total_results: 50 }) };
-          }
-          // Should not be reached — iterator should terminate at aggregatedCount === totalResults.
-          return { ok: true, status: 200, json: async () => ({ messages: [], total_results: 50 }) };
-        }));
-
-        const pages: any[] = [];
-        for await (const page of service.iterateSearchResults({
-          token: testAuth,
-          channelId: testChannelId,
-          guildId: testGuildId,
-          criteria: baseSearchCriteria,
-          terminateOnDedupEmpty: false,
-        })) {
-          pages.push(page);
-        }
-
-        const yielded = pages.flatMap((p) => p.messages);
-        expect(yielded).toHaveLength(50);
-        expect(callCount).toBe(2);
-        // No incomplete flag — clean termination.
-        expect(pages.some((p) => p.incomplete)).toBe(false);
-      });
-
-      it('safety valve fires after 5 wasted resets and emits incomplete=true', async () => {
-        // Reproduce the #169 wall: yield 500 messages, then Discord stops
-        // serving anything new. Each empty-at-non-zero-offset triggers
-        // pendingReset; subsequent reset hits offset=0 with all dedup'd.
-        // Without the safety valve this would loop forever.
-        const yielded500 = Array.from({ length: 500 }, (_, i) => makeMessage(`m${i}`));
-        let callCount = 0;
-        vi.stubGlobal('fetch', vi.fn(async (url: string) => {
-          callCount++;
-          // Cap test loops — if we don't terminate we'd be stuck here.
-          if (callCount > 100) {
-            return { ok: true, status: 200, json: async () => ({ messages: [], total_results: 2311 }) };
-          }
-          // First 20 calls advance offset 0..475 yielding 25 msgs each.
-          if (callCount <= 20) {
-            const start = (callCount - 1) * 25;
-            return { ok: true, status: 200, json: async () => ({
-              messages: yielded500.slice(start, start + 25).map((m) => [m]),
-              total_results: 2311,
-            }) };
-          }
-          // Beyond: alternate between rawCount=0 at non-zero offset
-          // (triggers reset) and dedup'd page at offset=0 (no progress).
-          // Both produce pageMessages=0 but only the offset>0 path
-          // increments pendingReset. The wastedResets safety valve must
-          // fire within 5 such cycles.
-          if (url.includes('offset=')) {
-            return { ok: true, status: 200, json: async () => ({ messages: [], total_results: 2311 }) };
-          }
-          // offset=0 (after pendingReset): return the same 500 dedup'd.
-          return { ok: true, status: 200, json: async () => ({
-            messages: yielded500.slice(0, 25).map((m) => [m]),
-            total_results: 2311,
-          }) };
-        }));
-
-        const pages: any[] = [];
-        for await (const page of service.iterateSearchResults({
-          token: testAuth,
-          channelId: testChannelId,
-          guildId: testGuildId,
-          criteria: baseSearchCriteria,
-          terminateOnDedupEmpty: false,
-        })) {
-          pages.push(page);
-        }
-
-        const yielded = pages.flatMap((p) => p.messages);
-        // We yielded all 500 from the initial walk.
-        expect(yielded).toHaveLength(500);
-        // Did NOT hit the test-loop emergency cap (would be > 100 calls).
-        expect(callCount).toBeLessThan(50);
-        // Final synthetic page carries incomplete=true with the right count gap.
-        const finalPage = pages[pages.length - 1];
-        expect(finalPage.incomplete).toBe(true);
-        expect(finalPage.aggregatedCount).toBe(500);
-        expect(finalPage.totalResults).toBe(2311);
-        expect(finalPage.messages).toHaveLength(0);
-      });
-
-      it('does not emit incomplete flag when totalResults is below the noise floor', async () => {
-        // Tiny match sets (totalResults <= 100) suppress the incomplete
-        // flag — Discord-side jitter on small counts is normal and
-        // doesn't merit a user-facing warning.
-        const tiny = Array.from({ length: 30 }, (_, i) => makeMessage(`t${i}`));
-        let callCount = 0;
-        vi.stubGlobal('fetch', vi.fn(async () => {
-          callCount++;
-          if (callCount === 1) {
-            return { ok: true, status: 200, json: async () => ({ messages: tiny.map((m) => [m]), total_results: 90 }) };
-          }
-          // Keep returning the same 30 — dedup-empty path. Without the
-          // safety valve and noise floor, we'd loop; with both, we
-          // terminate, but no incomplete flag.
-          return { ok: true, status: 200, json: async () => ({ messages: tiny.map((m) => [m]), total_results: 90 }) };
-        }));
-
-        const pages: any[] = [];
-        for await (const page of service.iterateSearchResults({
-          token: testAuth,
-          channelId: testChannelId,
-          guildId: testGuildId,
-          criteria: baseSearchCriteria,
-          terminateOnDedupEmpty: false,
-        })) {
-          pages.push(page);
-        }
-
-        // Below the noise floor (totalResults=90), so no incomplete.
-        expect(pages.some((p) => p.incomplete)).toBe(false);
-        // Still terminated (didn't infinite-loop) thanks to the safety valve.
-        expect(callCount).toBeLessThan(50);
-      });
-
-      it('default mode (terminateOnDedupEmpty omitted) preserves the legacy 2-page terminator', async () => {
-        // Sanity check the default path with the new option present in
-        // the lib. Same shape as the existing
-        // "terminates when consecutive pages are fully dedup-filtered"
-        // test, but explicitly omitting the flag to confirm default.
-        const recurring = Array.from({ length: 5 }, (_, i) => makeMessage(`r${i}`));
-        let callCount = 0;
-        vi.stubGlobal('fetch', vi.fn(async () => {
-          callCount++;
-          return { ok: true, status: 200, json: async () => ({
-            messages: recurring.map((m) => [m]),
-            total_results: 5,
-          }) };
-        }));
-
-        const pages: any[] = [];
-        for await (const page of service.iterateSearchResults({
-          token: testAuth,
-          channelId: testChannelId,
-          guildId: testGuildId,
-          criteria: baseSearchCriteria,
-          // terminateOnDedupEmpty omitted -> defaults to true.
-        })) {
-          pages.push(page);
-        }
-
-        const yielded = pages.flatMap((p) => p.messages);
-        expect(yielded).toHaveLength(5);
-        expect(callCount).toBeLessThan(10);
-      });
+      // Call 1: no max_id (initial criteria has no searchBeforeDate).
+      expect(calls[0]).not.toContain('max_id=');
+      // Call 2: max_id present, equals snowflake(olderTs).
+      const expectedMaxId2 = service.generateSnowflake(new Date(olderTs));
+      expect(calls[1]).toContain(`max_id=${expectedMaxId2}`);
+      // Call 3: max_id updated to the newest oldest-seen (page 2's older message).
+      const expectedMaxId3 = service.generateSnowflake(new Date('2024-01-01T00:00:00.000Z'));
+      expect(calls[2]).toContain(`max_id=${expectedMaxId3}`);
+      // No call ever uses non-zero offset (the simplification removed it).
+      for (const url of calls) {
+        // offset=0 is acceptable (or absent); offset=N for N>0 must not appear.
+        expect(url).not.toMatch(/offset=[1-9]/);
+      }
+      // Yielded all 4 messages across both data pages.
+      const yielded = pages.flatMap((p) => p.messages.map((m: any) => m.id));
+      expect(yielded.sort()).toEqual(['a', 'b', 'c', 'd']);
     });
   });
 

@@ -474,54 +474,50 @@ class DiscordService {
     this: DiscordService,
     options: SearchIterationOptions,
   ): AsyncGenerator<SearchIterationPage, void, void> {
-    const MAX_PER_QUERY = 5000;
-    const EMPTY_PAGE_TERMINATE_THRESHOLD = 2;
     const RETRY_AFTER_DEFAULT_SECONDS = 1;
-    // Safety valve when terminateOnDedupEmpty is false. After this
-    // many consecutive resets-without-progress the iterator gives up,
-    // protecting against Discord serving zero new matches forever
-    // despite total_results claiming more remain.
-    const MAX_WASTED_RESETS = 5;
-    // Threshold below which we consider an early termination
-    // "incomplete" enough to warrant a synthetic final-yield with the
-    // incomplete flag. 5% slack absorbs Discord-side total_results
-    // jitter; the >100 floor suppresses noise on tiny match sets where
-    // a few-message gap is normal.
+    // Safety net: terminate after this many consecutive empty Discord
+    // responses. One empty response usually means the channel is
+    // exhausted within the current cap-shifted window; requiring two
+    // protects against transient indexer hiccups serving a momentarily-
+    // empty page when matches still exist.
+    const EMPTY_PAGE_TERMINATE_THRESHOLD = 2;
+    // Threshold below which an early termination is "incomplete" enough
+    // to warrant a synthetic final-yield with the incomplete flag. 5%
+    // slack absorbs Discord-side total_results jitter; the >100 floor
+    // suppresses noise on tiny match sets where a few-message gap is
+    // normal.
     const INCOMPLETE_RATIO_THRESHOLD = 0.95;
     const INCOMPLETE_MIN_TOTAL = 100;
 
-    const terminateOnDedupEmpty = options.terminateOnDedupEmpty ?? true;
-
     let currentCriteria: SearchCriteria = { ...options.criteria };
-    let offset = 0;
     let pageIndex = 0;
     let aggregatedCount = 0;
-    let crossedQueryBoundary = false;
-    let prevTotalResults: number | null = null;
-    let pendingReset = false;
-    let consecutiveEmptyPages = 0;
-    // Safety-valve state for terminateOnDedupEmpty=false. We count
-    // resets-back-to-offset=0 that didn't grow aggregatedCount since the
-    // last reset. Five such "wasted resets" indicate Discord truly
-    // won't serve more matches, so we bail to prevent an infinite loop.
-    let wastedResets = 0;
-    let aggregatedCountAtLastReset = 0;
+    let consecutiveEmptyResponses = 0;
     let lastTotalResults = 0;
-    const seen = new Set<string>();
+    // Always-cap-shift pagination: each iteration after the first sets
+    // `searchBeforeDate = oldestSeenTimestamp`, narrowing the search
+    // window past everything we've already yielded. Discord's `max_id`
+    // is exclusive, so previously-yielded messages are structurally
+    // unreachable on subsequent calls — no dedup `Set` needed, no
+    // offset advancement, no reset machinery. This unifies what was
+    // previously a 5-state-flag pagination model (`offset`,
+    // `pendingReset`, `consecutiveEmptyPages`, `wastedResets`,
+    // `prevTotalResults`) into one boundary advance per page.
+    let oldestSeenTimestamp: Date | null = null;
 
-    // User-supplied lower bound (snowflake form) for the cap-shift guard.
-    // We tighten the upper bound (max_id) at each cap; if that ever drops
-    // to or below the user's lower bound, the window has collapsed and we
-    // terminate. Discord would return zero matches anyway; the explicit
-    // guard saves the wasted call.
+    // User-supplied lower bound (snowflake form) for the cap-shift
+    // guard. We tighten the upper bound (max_id) every iteration; if
+    // that ever drops to or below the user's lower bound, the window
+    // has collapsed and we terminate. Discord would return zero
+    // matches anyway; the explicit guard saves the wasted call.
     const userLowerBoundSnowflake = options.criteria.searchAfterDate
       ? this.generateSnowflake(options.criteria.searchAfterDate)
       : null;
 
     // Helper: yield a synthetic final page with incomplete=true if we
-    // terminated substantially below totalResults (and the total is big
-    // enough to be meaningful). Caller reads the flag and surfaces a
-    // warning. No-op when termination was clean.
+    // terminated substantially below totalResults (and the total is
+    // big enough to be meaningful). Caller reads the flag and surfaces
+    // a warning. No-op when termination was clean.
     const maybeYieldIncomplete = function* (): Generator<SearchIterationPage, void, void> {
       if (
         lastTotalResults > INCOMPLETE_MIN_TOTAL &&
@@ -532,7 +528,6 @@ class DiscordService {
           totalResults: lastTotalResults,
           pageIndex,
           aggregatedCount,
-          crossedQueryBoundary: false,
           incomplete: true,
         };
       }
@@ -541,36 +536,36 @@ class DiscordService {
     while (true) {
       if (options.shouldStop && (await options.shouldStop())) return;
 
-      if (pendingReset) {
-        // Count this reset against the safety valve only when it's a
-        // wasted one (aggregatedCount didn't grow since the prior
-        // reset). The reset still happens regardless — the counter
-        // just decides whether we trip the safety valve.
-        if (aggregatedCount === aggregatedCountAtLastReset) {
-          wastedResets++;
-          if (wastedResets >= MAX_WASTED_RESETS) {
-            yield* maybeYieldIncomplete();
+      // Cap-shift the search window past everything yielded so far.
+      // First iteration leaves criteria as user-supplied; subsequent
+      // iterations narrow `searchBeforeDate` to the oldest yielded
+      // timestamp. Discord's `max_id` is exclusive so the boundary
+      // message itself is structurally excluded — no dedup needed.
+      if (oldestSeenTimestamp) {
+        if (userLowerBoundSnowflake) {
+          const newUpperSnowflake = this.generateSnowflake(oldestSeenTimestamp);
+          if (BigInt(newUpperSnowflake) <= BigInt(userLowerBoundSnowflake)) {
+            // Window collapsed onto user's lower bound — clean termination.
             return;
           }
-        } else {
-          wastedResets = 0;
-          aggregatedCountAtLastReset = aggregatedCount;
         }
-        offset = 0;
-        pendingReset = false;
+        currentCriteria = {
+          ...currentCriteria,
+          searchBeforeDate: oldestSeenTimestamp,
+        };
       }
 
       const response = await this.fetchSearchMessageData(
         options.token,
-        offset,
+        0, // always offset=0; pagination is cap-shift via searchBeforeDate
         options.channelId,
         options.guildId,
         currentCriteria,
       );
 
       // 202 Accepted: entity isn't yet indexed. Sleep retry_after and
-      // refetch the same offset/criteria. retry_after = 0 means "short
-      // delay" — we use a small default.
+      // refetch the same criteria. retry_after = 0 means "short delay"
+      // — we use a small default.
       if (response.success && response.status === 202) {
         const retryAfter =
           (response.data as { retry_after?: number } | undefined)?.retry_after ?? 0;
@@ -588,33 +583,32 @@ class DiscordService {
 
       const searchResult = response.data as SearchMessageResult;
       const rawMessages = searchResult.messages || [];
-      const rawCount = rawMessages.length;
       const flatMessages = Array.isArray(rawMessages[0])
         ? (rawMessages as unknown as Message[][]).flat()
         : (rawMessages as Message[]);
 
-      const pageMessages: Message[] = [];
+      // Track oldest timestamp for the next iteration's cap-shift.
       for (const m of flatMessages) {
-        if (!seen.has(m.id)) {
-          seen.add(m.id);
-          pageMessages.push(m);
+        if (m.timestamp) {
+          const ts = new Date(m.timestamp);
+          if (oldestSeenTimestamp === null || ts < oldestSeenTimestamp) {
+            oldestSeenTimestamp = ts;
+          }
         }
       }
-      aggregatedCount += pageMessages.length;
+      aggregatedCount += flatMessages.length;
 
       const totalResults = searchResult.total_results ?? 0;
       lastTotalResults = totalResults;
 
-      // Yield every page (including the first, even if empty) so callers
-      // can learn totalResults up-front.
+      // Yield every page (including the first, even if empty) so
+      // callers can learn totalResults up-front.
       yield {
-        messages: pageMessages,
+        messages: flatMessages,
         totalResults,
         pageIndex,
         aggregatedCount,
-        crossedQueryBoundary,
       };
-      crossedQueryBoundary = false;
       pageIndex++;
 
       // Initial-empty fast path: yield once with totalResults=0 + no
@@ -623,110 +617,30 @@ class DiscordService {
       // tests/mocks while messages are populated (inconsistent fixture
       // shape), and we don't want to terminate on the first page in
       // that case.
-      if (totalResults === 0 && pageMessages.length === 0 && pageIndex === 1) return;
+      if (totalResults === 0 && flatMessages.length === 0 && pageIndex === 1) return;
 
-      // Termination rule for mutating consumers (default): two
-      // consecutive pages with zero NEW unique messages. Counts both
-      // truly-empty pages (rawCount=0) AND pages where every entry was
-      // already in `seen` (Discord re-served already-yielded results).
-      // Required for purge — when Discord keeps re-serving thread-
-      // starter system messages the consumer can't delete, the iterator
-      // must stop or it loops forever (#148 in the consumer repo).
-      //
-      // Read-only consumers (bulk export) opt out via
-      // terminateOnDedupEmpty=false. They yield each unique message
-      // exactly once, so dedup-empty pages signal Discord-side issues
-      // (index churn, undocumented offset cap), not iterator end-state.
-      // Such consumers rely on aggregatedCount >= totalResults plus the
-      // wasted-resets safety valve for termination.
-      if (pageMessages.length === 0) {
-        consecutiveEmptyPages++;
-        if (consecutiveEmptyPages >= EMPTY_PAGE_TERMINATE_THRESHOLD) {
-          if (terminateOnDedupEmpty) {
-            yield* maybeYieldIncomplete();
-            return;
-          }
-          // Read-only consumer: don't give up on dedup-empty pages.
-          // Force a reset to offset=0 so Discord's index gets a chance
-          // to serve fresh matches from the top. The reset itself
-          // counts toward the wasted-resets safety valve — if reset
-          // also produces dedup-empty + advancing offset never grows
-          // aggregatedCount, the safety valve fires after 5 cycles.
-          pendingReset = true;
-          consecutiveEmptyPages = 0;
+      // Termination: Discord returned an empty response. Channel is
+      // exhausted within the current cap-shifted window. The 2-page
+      // threshold absorbs transient indexer hiccups (Discord
+      // occasionally serves an empty page when matches still exist;
+      // requiring two-in-a-row eliminates the false-positive). With
+      // the always-cap-shift model this is the SOLE termination
+      // condition beyond the user-lower-bound collapse.
+      if (flatMessages.length === 0) {
+        consecutiveEmptyResponses++;
+        if (consecutiveEmptyResponses >= EMPTY_PAGE_TERMINATE_THRESHOLD) {
+          yield* maybeYieldIncomplete();
+          return;
         }
       } else {
-        consecutiveEmptyPages = 0;
+        consecutiveEmptyResponses = 0;
       }
 
-      // Read-only consumers: also terminate when we've yielded every
-      // message Discord said exists. Without this, the iterator loops
-      // forever on a stable index past total_results.
-      if (!terminateOnDedupEmpty && totalResults > 0 && aggregatedCount >= totalResults) {
-        // No incomplete yield — this is a clean completion.
-        return;
-      }
-
-      // Cap-shift: hit the 5000-match per-query ceiling. Tighten max_id
-      // (searchBeforeDate) to the oldest-seen message and restart the
-      // window at offset=0. Walk strictly newest→oldest; user's
-      // lower bound (searchAfterDate / min_id) is preserved.
-      const nextOffset = offset + rawCount;
-      const atOrPastCap = nextOffset >= MAX_PER_QUERY;
-      if (atOrPastCap) {
-        if (flatMessages.length === 0) return;
-        const lastMessage = flatMessages[flatMessages.length - 1];
-        if (!lastMessage?.timestamp) return;
-
-        const newSearchBeforeDate = new Date(lastMessage.timestamp);
-        if (userLowerBoundSnowflake) {
-          const newUpperSnowflake = this.generateSnowflake(newSearchBeforeDate);
-          if (BigInt(newUpperSnowflake) <= BigInt(userLowerBoundSnowflake)) {
-            return;
-          }
-        }
-        currentCriteria = {
-          ...currentCriteria,
-          searchBeforeDate: newSearchBeforeDate,
-        };
-        offset = 0;
-        crossedQueryBoundary = true;
-        prevTotalResults = null;
-        consecutiveEmptyPages = 0;
-      } else {
-        // total_results shift between pages signals reshuffle; reset to
-        // offset=0 of the same query window on the next iteration. The
-        // `seen` Set carries forward so already-yielded messages don't
-        // re-process if they reappear.
-        if (prevTotalResults !== null && totalResults !== prevTotalResults) {
-          pendingReset = true;
-        }
-        prevTotalResults = totalResults;
-
-        // Empty page at non-zero offset means results moved out from
-        // under us (deletes by mutating consumers, or transient indexer
-        // state). Reset to offset=0 so we don't loop on the same
-        // stale-empty offset.
-        if (rawCount === 0 && offset > 0) {
-          pendingReset = true;
-        }
-
-        if (!pendingReset) {
-          offset = nextOffset;
-        }
-      }
-
+      // Caller-controlled inter-page hook (delay + cancel). Returning
+      // `true` stops iteration before the next request.
       if (options.onBetweenPages) {
         const action = await options.onBetweenPages();
         if (action === true) return;
-        if (action === 'reset') {
-          // Legacy explicit-reset hook. Kept as a safety hatch for
-          // callers (and tests) that want manual reset control. The
-          // iterator self-detects shifts via total_results so most
-          // consumers no longer need this.
-          offset = 0;
-          pendingReset = false;
-        }
       }
     }
   };
