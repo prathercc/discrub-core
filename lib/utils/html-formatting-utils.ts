@@ -1,7 +1,6 @@
 import hljs from 'highlight.js';
 import { MessageRegex } from '../regex/index.ts';
 import { parseSpecialFormatting } from './message-formatting-utils.ts';
-import { convertEmojisToHtml } from './export-utils.ts';
 import type { HtmlFormattingContext, EmbedRenderOptions } from '../types/html-formatting-types.ts';
 import type { Embed } from '../types/discord-types.ts';
 
@@ -119,8 +118,17 @@ export const renderLinkHtml = (url: string, text: string, title?: string): strin
 };
 
 /**
- * Convert Discord markdown and formatting to HTML
- * Processing order is critical to avoid nested formatting issues
+ * Convert Discord markdown and formatting to HTML.
+ *
+ * Pipeline shape: phase 1 stashes every pattern that depends on literal `<`
+ * (Discord pseudo-tags) or that produces self-contained HTML (code blocks,
+ * inline code) into a placeholder table while the content is still raw.
+ * Phase 2 HTML-escapes the remaining user text — this is the safety step
+ * that closes #198 (raw `<div>` in user content used to cascade through
+ * the export). Phase 3 processes markdown patterns that don't depend on
+ * `<` (headings, links, bold, etc.) against the now-escaped content.
+ * Phase 4 restores placeholders. Placeholders use NUL-bracketed ASCII
+ * tokens that survive both HTML escape and every markdown regex.
  *
  * @param content Raw message content with Discord markdown
  * @param context Context containing userMap, channelMap, emojiMap, etc.
@@ -132,26 +140,107 @@ export const formatContentAsHtml = (
 ): string => {
   if (!content) return '';
 
-  let html = content;
   const { userMap, channelMap, guildRoles = [], emojiMap, sanitizedName } = context;
 
-  // Step 1: Custom emojis (must be first to avoid conflicts)
-  html = convertEmojisToHtml(html, emojiMap, sanitizedName);
+  const stash: string[] = [];
+  const stashHtml = (rendered: string): string => {
+    const key = `\x00DCPH${stash.length}\x00`;
+    stash.push(rendered);
+    return key;
+  };
 
-  // Step 2: Code blocks (must be early to preserve code content)
+  let html = content;
+
+  // ---- Phase 1: stash patterns operating on RAW (unescaped) content. ----
+
+  // Code blocks ```...``` — hljs already escapes the code body.
   const codeMatches = Array.from(html.matchAll(MessageRegex.CODE));
   codeMatches.forEach(({ 0: codeRef, groups }) => {
     const codeText = groups?.text?.replaceAll('```', '') || '';
-    // Try to detect language from first line
     const lines = codeText.split('\n');
     const firstLine = lines[0]?.trim() || '';
     const possibleLang = firstLine.length < 20 && !firstLine.includes(' ') ? firstLine : undefined;
     const actualCode = possibleLang ? lines.slice(1).join('\n') : codeText;
-
-    html = html.replaceAll(codeRef, renderCodeBlockHtml(actualCode, possibleLang));
+    html = html.replaceAll(codeRef, stashHtml(renderCodeBlockHtml(actualCode, possibleLang)));
   });
 
-  // Step 3: Headings (# ## ### at start of line)
+  // Auto-link URLs <https://...> (literal `<`).
+  const autoLinkMatches = Array.from(html.matchAll(MessageRegex.AUTO_LINK));
+  autoLinkMatches.forEach(({ 0: autoLinkRef, groups }) => {
+    const url = groups?.url || '';
+    html = html.replaceAll(autoLinkRef, stashHtml(renderHyperlinkHtml(url)));
+  });
+
+  // Custom emojis <:name:id> and <a:name:id> (literal `<`).
+  // Inlined here so each match gets its own stash placeholder rather than
+  // running convertEmojisToHtml in bulk and then trying to find the <img>
+  // tags after the fact.
+  const emojiRegex = /<(a)?:(\w+):(\d+)>/g;
+  const emojiMatches = Array.from(html.matchAll(emojiRegex));
+  emojiMatches.forEach((match) => {
+    const matchRef = match[0];
+    const animated = match[1];
+    const name = match[2];
+    const id = match[3];
+    const localPath = emojiMap?.[id];
+    let imgSrc: string;
+    if (localPath && sanitizedName) {
+      imgSrc = localPath.replace(`${sanitizedName}/`, '');
+    } else {
+      const animatedParam = animated ? '?animated=true' : '';
+      imgSrc = `https://cdn.discordapp.com/emojis/${id}.webp${animatedParam}`;
+    }
+    const emojiHtml = `<img class="emoji" src="${imgSrc}" alt=":${name}:" title=":${name}:">`;
+    html = html.replaceAll(matchRef, stashHtml(emojiHtml));
+  });
+
+  // User mentions <@id>, <@!id>, <@&id> (literal `<`).
+  const userMentionMatches = Array.from(html.matchAll(MessageRegex.USER_MENTION));
+  userMentionMatches.forEach(({ 0: ref, groups }) => {
+    const id = groups?.user_id || '';
+    const user = userMap[id];
+    const displayName = user?.displayName || user?.userName || 'Unknown User';
+    html = html.replaceAll(ref, stashHtml(renderUserMentionHtml(id, displayName)));
+  });
+
+  // Channel mentions <#id> (literal `<`).
+  const channelMatches = Array.from(html.matchAll(MessageRegex.CHANNEL_MENTION));
+  channelMatches.forEach(({ 0: ref, groups }) => {
+    const id = groups?.channel_id || '';
+    const channelName = channelMap?.[id]?.name || 'unknown-channel';
+    html = html.replaceAll(ref, stashHtml(renderChannelMentionHtml(id, channelName)));
+  });
+
+  // Inline code `text` — renderInlineCodeHtml escapes internally, so we
+  // stash now (before phase 2 would double-escape).
+  const { quote } = parseSpecialFormatting(html, { userMap, guildRoles });
+  quote.forEach((quoteRef) => {
+    html = html.replaceAll(quoteRef.raw, stashHtml(renderInlineCodeHtml(quoteRef.text)));
+  });
+
+  // ---- Phase 2: HTML-escape remaining user text. ----
+  // Placeholders contain only NUL chars and ASCII letters/digits — they
+  // pass through unchanged. Markdown markers (`**`, `_`, `~`, `|`, `#`,
+  // backticks) also pass through unchanged.
+  html = html.replace(/[&<>"']/g, (char) => {
+    const map: Record<string, string> = {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#039;',
+    };
+    return map[char];
+  });
+
+  // ---- Phase 3: markdown patterns that don't depend on literal `<`. ----
+  // Inputs at this point are already HTML-escaped, so the inline renderers
+  // here MUST NOT re-escape — that would double-escape `&amp;` into
+  // `&amp;amp;`. Headings/bold/italic/etc. already pass text through raw.
+  // Link renderers do escape internally, so we open-code the link emission
+  // here against the already-escaped strings.
+
+  // Headings (# ## ###)
   const headingMatches = Array.from(html.matchAll(MessageRegex.HEADING));
   headingMatches.forEach(({ 0: headingRef, groups }) => {
     const level = (groups?.hashes || '#').length;
@@ -159,80 +248,58 @@ export const formatContentAsHtml = (
     html = html.replaceAll(headingRef, renderHeadingHtml(level, text));
   });
 
-  // Step 4: Auto-linked URLs <https://...> (Discord angle-bracket links)
-  const autoLinkMatches = Array.from(html.matchAll(MessageRegex.AUTO_LINK));
-  autoLinkMatches.forEach(({ 0: autoLinkRef, groups }) => {
-    const url = groups?.url || '';
-    html = html.replaceAll(autoLinkRef, renderHyperlinkHtml(url));
-  });
-
-  // Step 5: Links [text](url)
+  // Markdown links [text](url)
   const { link } = parseSpecialFormatting(html, { userMap, guildRoles });
   link.forEach((linkRef) => {
-    html = html.replaceAll(
-      linkRef.raw,
-      renderLinkHtml(linkRef.url, linkRef.text, linkRef.description)
-    );
+    const titleAttr = linkRef.description ? ` title="${linkRef.description}"` : '';
+    const linkHtml = `<a href="${linkRef.url}" target="_blank" rel="noopener noreferrer"${titleAttr}>${linkRef.text}</a>`;
+    html = html.replaceAll(linkRef.raw, linkHtml);
   });
 
-  // Step 6: Hyperlinks http://
+  // Plain hyperlinks http(s)://
   const { hyperLink } = parseSpecialFormatting(html, { userMap, guildRoles });
   hyperLink.forEach((hyperLinkRef) => {
-    html = html.replaceAll(hyperLinkRef.raw, renderHyperlinkHtml(hyperLinkRef.raw));
+    const url = hyperLinkRef.raw;
+    const linkHtml = `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`;
+    html = html.replaceAll(hyperLinkRef.raw, linkHtml);
   });
 
-  // Step 7: Bold **text**
+  // Bold **text**
   const { bold } = parseSpecialFormatting(html, { userMap, guildRoles });
   bold.forEach((boldRef) => {
     html = html.replaceAll(boldRef.raw, renderBoldHtml(boldRef.text));
   });
 
-  // Step 8: Italic _text_ or *text*
+  // Italic _text_ or *text*
   const { italics } = parseSpecialFormatting(html, { userMap, guildRoles });
   italics.forEach((italicRef) => {
     html = html.replaceAll(italicRef.raw, renderItalicHtml(italicRef.text));
   });
 
-  // Step 9: Underline __text__
+  // Underline __text__
   const { underLine } = parseSpecialFormatting(html, { userMap, guildRoles });
   underLine.forEach((underLineRef) => {
     html = html.replaceAll(underLineRef.raw, renderUnderlineHtml(underLineRef.text));
   });
 
-  // Step 10: Strikethrough ~~text~~
+  // Strikethrough ~~text~~
   const strikethroughMatches = Array.from(html.matchAll(MessageRegex.STRIKETHROUGH));
   strikethroughMatches.forEach(({ 0: strikeRef, groups }) => {
     const text = groups?.text || '';
     html = html.replaceAll(strikeRef, renderStrikethroughHtml(text));
   });
 
-  // Step 11: Spoilers ||text||
+  // Spoilers ||text||
   const spoilerMatches = Array.from(html.matchAll(MessageRegex.SPOILER));
   spoilerMatches.forEach(({ 0: spoilerRef, groups }) => {
     const text = groups?.text || '';
     html = html.replaceAll(spoilerRef, renderSpoilerHtml(text));
   });
 
-  // Step 12: Inline code `text`
-  const { quote } = parseSpecialFormatting(html, { userMap, guildRoles });
-  quote.forEach((quoteRef) => {
-    html = html.replaceAll(quoteRef.raw, renderInlineCodeHtml(quoteRef.text));
-  });
-
-  // Step 13: Channel mentions <#id>
-  const { channel } = parseSpecialFormatting(html, { userMap, guildRoles });
-  channel.forEach((channelRef) => {
-    const channelName = channelMap?.[channelRef.channelId || '']?.name || 'unknown-channel';
-    html = html.replaceAll(channelRef.raw, renderChannelMentionHtml(channelRef.channelId || '', channelName));
-  });
-
-  // Step 14: User mentions <@id>
-  const { userMention } = parseSpecialFormatting(html, { userMap, guildRoles });
-  userMention.forEach((userMentionRef) => {
-    const user = userMap[userMentionRef.id];
-    const displayName = user?.displayName || user?.userName || 'Unknown User';
-    html = html.replaceAll(userMentionRef.raw, renderUserMentionHtml(userMentionRef.id, displayName));
-  });
+  // ---- Phase 4: restore phase-1 stashed HTML. ----
+  for (let i = 0; i < stash.length; i++) {
+    html = html.replaceAll(`\x00DCPH${i}\x00`, stash[i]);
+  }
 
   return html;
 };

@@ -285,6 +285,105 @@ describe('html-formatting-utils', () => {
     });
   });
 
+  describe('formatContentAsHtml — HTML safety (#198)', () => {
+    // Bot embeds (and any user message) can include raw HTML in the
+    // content. Before the fix, formatContentAsHtml never escaped < > & " '
+    // so raw <div> in user content cascaded into the export, unbalancing
+    // the message-text wrapper and tiling subsequent messages horizontally.
+    const ctx = { userMap: {}, channelMap: {} };
+
+    it('escapes a raw <div> in user content', () => {
+      const out = formatContentAsHtml('hello <div>x</div> world', ctx);
+      expect(out).not.toMatch(/<div>/);
+      expect(out).toContain('&lt;div&gt;');
+      expect(out).toContain('&lt;/div&gt;');
+    });
+
+    it('escapes unclosed raw <div>', () => {
+      const out = formatContentAsHtml('hi <div>unclosed', ctx);
+      expect(out).not.toMatch(/<div>/);
+      expect(out).toContain('&lt;div&gt;');
+    });
+
+    it('escapes a raw <script> tag', () => {
+      const out = formatContentAsHtml('<script>alert(1)</script>', ctx);
+      expect(out).not.toMatch(/<script>/);
+      expect(out).toContain('&lt;script&gt;');
+    });
+
+    it('escapes raw & in plain content', () => {
+      const out = formatContentAsHtml('Tom & Jerry', ctx);
+      expect(out).toContain('Tom &amp; Jerry');
+    });
+
+    it('escapes raw " and \' in plain content', () => {
+      const out = formatContentAsHtml(`she said "hi" and 'bye'`, ctx);
+      expect(out).toContain('&quot;hi&quot;');
+      expect(out).toContain('&#039;bye&#039;');
+    });
+
+    it('preserves user mentions (uses literal <@id>)', () => {
+      const out = formatContentAsHtml(
+        'hi <@123>',
+        { userMap: { '123': { userName: 'alice', displayName: 'Alice' } }, channelMap: {} },
+      );
+      expect(out).toContain('class="user-mention"');
+      expect(out).toContain('@Alice');
+      expect(out).not.toContain('<@123>'); // The raw tag should be consumed.
+    });
+
+    it('preserves channel mentions (uses literal <#id>)', () => {
+      const out = formatContentAsHtml(
+        'see <#987>',
+        { userMap: {}, channelMap: { '987': { name: 'general' } } },
+      );
+      expect(out).toContain('class="channel-mention"');
+      expect(out).toContain('general');
+    });
+
+    it('preserves auto-link URLs (uses literal <https://...>)', () => {
+      const out = formatContentAsHtml('go <https://example.com> now', ctx);
+      expect(out).toMatch(/<a [^>]*href="https:\/\/example\.com"/);
+    });
+
+    it('preserves custom emoji (uses literal <:name:id>)', () => {
+      const out = formatContentAsHtml('hi <:smile:111>', { userMap: {}, channelMap: {}, emojiMap: {} });
+      expect(out).toContain('<img class="emoji"');
+      expect(out).toContain(':smile:');
+    });
+
+    it('preserves animated custom emoji (uses literal <a:name:id>)', () => {
+      const out = formatContentAsHtml('hi <a:wave:222>', { userMap: {}, channelMap: {}, emojiMap: {} });
+      expect(out).toContain('<img class="emoji"');
+    });
+
+    it('does not double-escape inline code containing HTML', () => {
+      const out = formatContentAsHtml('use `<div>` here', ctx);
+      // Inline code escapes once; result should be &lt;div&gt; not &amp;lt;div&amp;gt;
+      expect(out).toContain('<code class="inline-code">&lt;div&gt;</code>');
+      expect(out).not.toContain('&amp;lt;');
+    });
+
+    it('does not double-escape code blocks containing HTML', () => {
+      const out = formatContentAsHtml('```\n<div>x</div>\n```', ctx);
+      // Code blocks go through hljs which escapes; final output should not double escape.
+      expect(out).not.toContain('&amp;lt;');
+    });
+
+    it('handles markdown bold combined with raw HTML safely', () => {
+      const out = formatContentAsHtml('**bold <div> text**', ctx);
+      expect(out).toContain('<strong>');
+      expect(out).toContain('&lt;div&gt;');
+      expect(out).not.toMatch(/<div>/);
+    });
+
+    it('survives a content string that looks like a closing tag only', () => {
+      const out = formatContentAsHtml('</div></div></div>', ctx);
+      expect(out).not.toMatch(/<\/div>/);
+      expect(out).toContain('&lt;/div&gt;');
+    });
+  });
+
   describe('renderEmbedAsHtml', () => {
     it('should render minimal embed', () => {
       const embed: Embed = {
