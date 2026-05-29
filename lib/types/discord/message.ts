@@ -41,6 +41,15 @@ export type Message = {
   message_reference?: MessageReferenceObject;
   flags?: number;
   referenced_message?: Message | null | undefined;
+  /**
+   * Forward Message snapshots (Discord late-2024 feature). When a user
+   * forwards a message into a channel, the receiving message has
+   * `message_reference.type === 1` and this array populated with the
+   * partial Message payload of the original (content, attachments,
+   * embeds, mentions, timestamp, etc.). The snapshot intentionally omits
+   * `author` for privacy. Filed under #197.
+   */
+  message_snapshots?: MessageSnapshot[];
   interaction?: MessageInteractionObject;
   thread?: Channel;
   components?: ComponentObject[];
@@ -50,4 +59,13 @@ export type Message = {
   role_subscription_data?: RoleSubscriptionDataObject;
   resolved?: ResolvedDataObject;
   userName?: string; // Used for quick filtering purposes
+};
+
+/**
+ * A single forward-snapshot's payload. Discord strips `author` (privacy)
+ * and sends a partial Message shape with the content/attachments/
+ * embeds/timestamp the user actually forwarded. Filed under #197.
+ */
+export type MessageSnapshot = {
+  message?: Partial<Message>;
 };

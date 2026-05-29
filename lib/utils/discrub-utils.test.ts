@@ -10,6 +10,8 @@ import {
   formatUserData,
   punctuateStringArr,
   getRichEmbeds,
+  isForwardedMessage,
+  getForwardedSnapshot,
   getExportFileName,
   getColor,
   getIconUrl,
@@ -1638,6 +1640,41 @@ describe('discrub-utils', () => {
 
       expect(users[0].name).toBe('apple');
       expect(users[1].name).toBe('zebra');
+    });
+  });
+
+  describe('Forward helpers (#197)', () => {
+    it('isForwardedMessage returns true when message_snapshots has at least one entry', () => {
+      expect(isForwardedMessage({ message_snapshots: [{ message: { content: 'x' } }] } as any)).toBe(true);
+    });
+
+    it('isForwardedMessage returns false when message_snapshots is empty', () => {
+      expect(isForwardedMessage({ message_snapshots: [] } as any)).toBe(false);
+    });
+
+    it('isForwardedMessage returns false when message_snapshots is missing', () => {
+      expect(isForwardedMessage({} as any)).toBe(false);
+    });
+
+    it('isForwardedMessage returns false on a reply (type-19 with message_reference but no snapshots)', () => {
+      expect(isForwardedMessage({
+        type: 19,
+        message_reference: { message_id: 'p1', channel_id: 'c1' },
+      } as any)).toBe(false);
+    });
+
+    it('getForwardedSnapshot returns the inner message of the first snapshot', () => {
+      const inner = { content: 'forwarded content', timestamp: '2026-01-01' };
+      expect(getForwardedSnapshot({ message_snapshots: [{ message: inner }] } as any)).toEqual(inner);
+    });
+
+    it('getForwardedSnapshot returns null when no snapshots', () => {
+      expect(getForwardedSnapshot({} as any)).toBeNull();
+      expect(getForwardedSnapshot({ message_snapshots: [] } as any)).toBeNull();
+    });
+
+    it('getForwardedSnapshot returns null when the first snapshot has no inner message', () => {
+      expect(getForwardedSnapshot({ message_snapshots: [{}] } as any)).toBeNull();
     });
   });
 });

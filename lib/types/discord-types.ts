@@ -20,7 +20,7 @@ export type { Guild } from "./discord/guild";
 export type { GuildChannelModify } from "./discord/guild-channel-modify";
 export type { GuildMemberObject } from "./discord/guild-member-object";
 export type { InstallParamsObject } from "./discord/install-params-object";
-export type { Message } from "./discord/message";
+export type { Message, MessageSnapshot } from "./discord/message";
 export type { MessageActivityObject } from "./discord/message-activity-object";
 export type { MessageModify } from "./discord/message-modify";
 export type { MessageCreate } from "./discord/message-create";

@@ -827,3 +827,41 @@ export const createPreFilterUsers = (
     sortByProperty(a, b, "name", SortDirection.ASCENDING),
   );
 };
+
+// ─── Forward message helpers (#197) ────────────────────────────────────
+// Discord's Forward Message feature (late 2024) attaches the original
+// payload to the receiving message as `message_snapshots[].message`.
+// The receiving message itself is type 0 with empty content and
+// `message_reference.type === 1` (FORWARD vs 0 = DEFAULT/REPLY). These
+// helpers converge consumer code paths on one definition of "is this a
+// forward" and "where is its payload" so emitters don't each re-derive.
+
+/**
+ * True when a message is a forwarded message (carries a snapshot of the
+ * original payload). Detected by snapshot presence, which is the
+ * load-bearing field; the `message_reference.type === 1` discriminator
+ * is metadata that may or may not be present depending on Discord's
+ * response shape.
+ */
+export const isForwardedMessage = (
+  message: Pick<Message, "message_snapshots" | "message_reference">,
+): boolean => {
+  return Array.isArray(message.message_snapshots) && message.message_snapshots.length > 0;
+};
+
+/**
+ * Returns the inner Message payload of the first snapshot when the
+ * input is a forwarded message, or null when it isn't. The inner
+ * payload is intentionally a Partial<Message>: Discord strips `author`
+ * for privacy and only includes the fields the original message
+ * carried (content, attachments, embeds, mentions, timestamp, flags).
+ */
+export const getForwardedSnapshot = (
+  message: Pick<Message, "message_snapshots">,
+): Partial<Message> | null => {
+  if (!Array.isArray(message.message_snapshots) || message.message_snapshots.length === 0) {
+    return null;
+  }
+  const first = message.message_snapshots[0];
+  return first?.message ?? null;
+};
