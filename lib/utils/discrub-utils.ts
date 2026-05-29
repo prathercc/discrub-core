@@ -865,3 +865,68 @@ export const getForwardedSnapshot = (
   const first = message.message_snapshots[0];
   return first?.message ?? null;
 };
+
+// ─── Message + date + user-display utils promoted from consumer (#195 cluster B) ───
+
+const THREAD_STARTER_MESSAGE_TYPE = 21;
+
+/**
+ * Returns the effective display content for a message. Type 21 (thread
+ * starter) messages have empty `content` — the actual text lives in
+ * `referenced_message.content`. Promoted from the discrub consumer's
+ * `src/utils/messageUtils.ts` so lib-side emitters (textEmitter et al)
+ * can stay self-contained.
+ */
+export const getMessageContent = (message: Message): string => {
+  if (message.type === THREAD_STARTER_MESSAGE_TYPE && message.referenced_message?.content) {
+    return message.referenced_message.content;
+  }
+  return message.content || "";
+};
+
+/**
+ * Format a message timestamp using configured date and time formats.
+ * Both are date-fns format strings. Promoted from the discrub
+ * consumer's `src/utils/dateUtils.ts`. `date-fns` is already a lib
+ * dependency (see imports above).
+ */
+export const formatMessageTimestamp = (
+  date: Date | string,
+  dateFormat: string,
+  timeFormat: string,
+): string => {
+  const d = typeof date === "string" ? new Date(date) : date;
+  return format(d, `${dateFormat} ${timeFormat}`);
+};
+
+/**
+ * Resolved per-user display fields used by exports. Strings carry their
+ * cached values or null when absent.
+ */
+export interface UserDisplayData {
+  username: string | null;
+  displayName: string | null;
+  nickname: string | null;
+}
+
+/**
+ * Resolve a user's display fields against the cached user map.
+ * Promoted from the discrub consumer's `src/utils/userDisplayUtils.ts`.
+ * Settings-aware in the consumer's `getDisplayName` variant; this
+ * lib-side helper returns the raw fields and leaves priority decisions
+ * to the caller.
+ */
+export const getUserDisplayData = (
+  userId: string,
+  userMap: ExportUserMap,
+  guildId: string | null,
+): UserDisplayData => {
+  const cachedUser = userMap[userId];
+  const username = cachedUser?.userName || null;
+  const displayName = cachedUser?.displayName || null;
+  const nickname =
+    guildId && cachedUser?.guilds?.[guildId]?.nick
+      ? cachedUser.guilds[guildId].nick!
+      : null;
+  return { username, displayName, nickname };
+};

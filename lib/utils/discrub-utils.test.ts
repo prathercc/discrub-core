@@ -12,6 +12,9 @@ import {
   getRichEmbeds,
   isForwardedMessage,
   getForwardedSnapshot,
+  getMessageContent,
+  formatMessageTimestamp,
+  getUserDisplayData,
   getExportFileName,
   getColor,
   getIconUrl,
@@ -1675,6 +1678,76 @@ describe('discrub-utils', () => {
 
     it('getForwardedSnapshot returns null when the first snapshot has no inner message', () => {
       expect(getForwardedSnapshot({ message_snapshots: [{}] } as any)).toBeNull();
+    });
+  });
+
+  describe('Promoted utils (#195 cluster B)', () => {
+    describe('getMessageContent', () => {
+      it('returns msg.content for a normal message', () => {
+        expect(getMessageContent({ type: 0, content: 'hello' } as any)).toBe('hello');
+      });
+
+      it('returns referenced_message.content for thread-starter (type 21)', () => {
+        expect(getMessageContent({
+          type: 21,
+          content: '',
+          referenced_message: { content: 'starter body' },
+        } as any)).toBe('starter body');
+      });
+
+      it('falls back to empty string when content is missing', () => {
+        expect(getMessageContent({ type: 0 } as any)).toBe('');
+      });
+    });
+
+    describe('formatMessageTimestamp', () => {
+      it('formats with the given dateFormat and timeFormat (string input)', () => {
+        const result = formatMessageTimestamp('2026-05-29T07:00:00.000Z', 'yyyy-MM-dd', 'HH:mm');
+        // Result is dependent on TZ; just assert shape.
+        expect(result).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+      });
+
+      it('accepts Date input', () => {
+        const result = formatMessageTimestamp(new Date('2026-05-29T07:00:00Z'), 'yyyy-MM-dd', 'HH:mm:ss');
+        expect(result).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+      });
+    });
+
+    describe('getUserDisplayData', () => {
+      const userMap = {
+        'u1': {
+          userName: 'alice_dev',
+          displayName: 'Alice',
+          guilds: { 'g1': { nick: 'Boss', roles: [], joinedAt: null, timestamp: 0 } },
+          timestamp: 0,
+        },
+      } as any;
+
+      it('returns nickname when guildId matches and nick is present', () => {
+        expect(getUserDisplayData('u1', userMap, 'g1').nickname).toBe('Boss');
+      });
+
+      it('returns null nickname when guildId is null', () => {
+        expect(getUserDisplayData('u1', userMap, null).nickname).toBeNull();
+      });
+
+      it('returns null nickname when guildId is not in user.guilds', () => {
+        expect(getUserDisplayData('u1', userMap, 'g2').nickname).toBeNull();
+      });
+
+      it('returns username + displayName from cache', () => {
+        const data = getUserDisplayData('u1', userMap, null);
+        expect(data.username).toBe('alice_dev');
+        expect(data.displayName).toBe('Alice');
+      });
+
+      it('returns all nulls for an unknown user', () => {
+        expect(getUserDisplayData('unknown', userMap, 'g1')).toEqual({
+          username: null,
+          displayName: null,
+          nickname: null,
+        });
+      });
     });
   });
 });

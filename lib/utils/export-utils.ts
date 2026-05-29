@@ -95,3 +95,13 @@ export const renderEmojiAsHtml = (
 
   return `<img class="emoji-reaction" src="${imgSrc}" alt=":${name}:" title=":${name}:">`;
 };
+
+// #195 cluster B: re-export the plain-text emitter so consumers can
+// `import { buildTextMessageBlock } from 'discrub-core/export-utils'`
+// alongside the other export helpers, without needing a separate
+// `./text-emitter` package entry.
+export {
+  buildTextMessageBlock,
+  generateTextPage,
+  type GenerateTextPageOptions,
+} from "./text-emitter.ts";

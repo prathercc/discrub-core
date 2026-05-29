@@ -102,6 +102,10 @@
       "types": "./lib/types/html-formatting-types.ts",
       "default": "./lib/types/html-formatting-types.ts"
     },
+    "./types/export-types": {
+      "types": "./lib/types/export-types.ts",
+      "default": "./lib/types/export-types.ts"
+    },
     "./highlight.js/styles/vs2015.css": {
       "default": "./node_modules/highlight.js/styles/vs2015.css"
     }
