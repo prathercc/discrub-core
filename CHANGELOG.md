@@ -5,6 +5,34 @@ All notable changes to `discrub-core` are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.4] - 2026-05-29
+
+### Added
+
+- **`MessageFetchService.resolveMessageReplies` + `DiscrubSetting.REPLIES_ENABLED` (#194).**
+  A reply-parent enrichment pass mirroring `resolveMessageReactions`: search
+  results omit the referenced message body, so this backfills it. Gated behind
+  the new opt-out setting.
+- **Forwarded-message support (#197).** New `Message.message_snapshots` field +
+  `MessageSnapshot` type, `MessageReferenceObject.type` (0 = reply, 1 = forward),
+  and an `isForwardedMessage` helper so consumers can detect and render the
+  forwarded snapshot's content, attachments, and embeds.
+- **`textEmitter` + emitter-knob types promoted into the library (#195).** The
+  plain-text export emitter and its supporting utilities, plus the shared
+  emitter configuration types (`MediaMaps`, `ExportConfig`, `TextFormatOptions`,
+  et al), now live in `lib/utils/export-utils` and `lib/types/export-types`.
+- **SearchCriteria active-filter counters promoted into `lib/filtering` (#195).**
+  `countActiveFilters`, `countTotalFilters`, and `hasActiveSearchFilters` are now
+  exported from the library so consumers no longer maintain their own copies.
+
+### Fixed
+
+- **Raw HTML in message content is now escaped in `formatContentAsHtml` (#198).**
+  Unescaped angle brackets in user content could open an HTML tag that never
+  closed, cascading the rest of an HTML export sideways. The formatter now
+  escapes raw content while preserving Discord's pseudo-tags via a
+  placeholder-based pipeline.
+
 ## [1.0.3] - 2026-05-15
 
 ### Changed
