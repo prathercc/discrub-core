@@ -34,6 +34,11 @@ export {
   TextExtractors,
   type TextExtractor,
   type TimeComparison,
+  // #195 cluster A: SearchCriteria active-filter counters promoted from
+  // the discrub consumer.
+  countActiveFilters,
+  countTotalFilters,
+  hasActiveSearchFilters,
 } from "./helpers.ts";
 
 // Filter handlers (exported for advanced usage)

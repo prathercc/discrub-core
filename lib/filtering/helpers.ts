@@ -1,7 +1,8 @@
 import { parseISO, isAfter, isBefore, isEqual } from "date-fns";
 import type { Message, Channel } from "../types/discord-types.ts";
+import type { SearchCriteria } from "../types/discrub-types.ts";
 import { messageTypeEquals } from "../utils/discrub-utils.ts";
-import { MessageCategory, MessageType } from "../enum/discord-enum.ts";
+import { MessageCategory, MessageType, IsPinnedType } from "../enum/discord-enum.ts";
 
 /**
  * Apply inverse logic to a filter condition
@@ -152,4 +153,54 @@ export const filterThread = (
   const matches =
     message.channel_id === filterValue || message.thread?.id === filterValue;
   return applyInverseLogic(matches, inverseActive);
+};
+
+// ─── SearchCriteria active-filter counting (#195 cluster A) ────────────────
+// Moved from the discrub consumer's src/utils/searchCriteria.ts. These are
+// pure transforms over the SearchCriteria type with no consumer-state
+// dependencies, so they fit cleanly alongside the rest of the filtering
+// helpers and let any future discrub-core consumer (CLI, modded plugin,
+// server-side tool) compute filter counts without re-implementing.
+
+/**
+ * Count the number of active filter axes on a SearchCriteria. Each
+ * userId/mentionId/selectedHasType counts independently (so a 3-user
+ * filter contributes 3), but isPinned, authorType, and the two date
+ * bounds each count at most 1. Used for UI badges showing "N filters
+ * active" + for the consumer's #178 milestone copy ("Loading all
+ * filtered messages (N filters active)…").
+ */
+export const countActiveFilters = (criteria: SearchCriteria): number => {
+  let count = 0;
+  if (criteria.searchMessageContent) count++;
+  if (criteria.userIds && criteria.userIds.length > 0) count += criteria.userIds.length;
+  if (criteria.selectedHasTypes && criteria.selectedHasTypes.length > 0) {
+    count += criteria.selectedHasTypes.length;
+  }
+  if (criteria.searchAfterDate) count++;
+  if (criteria.searchBeforeDate) count++;
+  if (criteria.isPinned !== undefined && criteria.isPinned !== IsPinnedType.UNSET) count++;
+  if (criteria.authorType) count++;
+  if (criteria.mentionIds && criteria.mentionIds.length > 0) count += criteria.mentionIds.length;
+  return count;
+};
+
+/**
+ * Sum of active filters across a (search, refine) criteria pair. Used
+ * by FilterModal's header chip to surface the combined filter count.
+ */
+export const countTotalFilters = (search: SearchCriteria, refine: SearchCriteria): number => {
+  return countActiveFilters(search) + countActiveFilters(refine);
+};
+
+/**
+ * True when at least one filter is active on a SearchCriteria. Null/
+ * undefined inputs return false (used by code paths that check whether
+ * a saved/restored criteria object is worth applying).
+ */
+export const hasActiveSearchFilters = (
+  criteria: SearchCriteria | null | undefined,
+): boolean => {
+  if (!criteria) return false;
+  return countActiveFilters(criteria) > 0;
 };

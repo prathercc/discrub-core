@@ -7,7 +7,12 @@ import {
   filterByTextContent,
   filterMessageType,
   filterThread,
+  countActiveFilters,
+  countTotalFilters,
+  hasActiveSearchFilters,
 } from './helpers.ts';
+import { IsPinnedType } from '../enum/discord-enum.ts';
+import type { SearchCriteria } from '../types/discrub-types.ts';
 import type { Message, Channel } from '../types/discord-types.ts';
 import { MessageCategory, MessageType } from '../enum/discord-enum.ts';
 
@@ -487,6 +492,83 @@ describe('filtering/helpers', () => {
       const result = filterThread('thread-123', message, false);
 
       expect(result).toBe(false);
+    });
+  });
+
+  describe('countActiveFilters / countTotalFilters / hasActiveSearchFilters (#195 cluster A)', () => {
+    const empty = (): SearchCriteria => ({}) as SearchCriteria;
+
+    it('returns 0 for an empty criteria object', () => {
+      expect(countActiveFilters(empty())).toBe(0);
+      expect(hasActiveSearchFilters(empty())).toBe(false);
+    });
+
+    it('returns 0 for null/undefined in hasActiveSearchFilters', () => {
+      expect(hasActiveSearchFilters(null)).toBe(false);
+      expect(hasActiveSearchFilters(undefined)).toBe(false);
+    });
+
+    it('counts searchMessageContent as 1 when set', () => {
+      expect(countActiveFilters({ searchMessageContent: 'hello' } as SearchCriteria)).toBe(1);
+    });
+
+    it('counts each userId as 1 (multi-user filter)', () => {
+      expect(countActiveFilters({ userIds: ['u1', 'u2', 'u3'] } as SearchCriteria)).toBe(3);
+    });
+
+    it('counts each selectedHasType as 1', () => {
+      expect(countActiveFilters({ selectedHasTypes: ['image', 'link'] } as any)).toBe(2);
+    });
+
+    it('counts both date range bounds independently', () => {
+      expect(countActiveFilters({ searchAfterDate: '2026-01-01' } as any)).toBe(1);
+      expect(countActiveFilters({ searchBeforeDate: '2026-02-01' } as any)).toBe(1);
+      expect(
+        countActiveFilters({ searchAfterDate: 'x', searchBeforeDate: 'y' } as any),
+      ).toBe(2);
+    });
+
+    it('counts isPinned only when not UNSET', () => {
+      expect(countActiveFilters({ isPinned: IsPinnedType.UNSET } as any)).toBe(0);
+      expect(countActiveFilters({ isPinned: IsPinnedType.YES } as any)).toBe(1);
+      expect(countActiveFilters({ isPinned: IsPinnedType.NO } as any)).toBe(1);
+      // Explicitly undefined also counts as 0.
+      expect(countActiveFilters({ isPinned: undefined } as any)).toBe(0);
+    });
+
+    it('counts authorType as 1 when set', () => {
+      expect(countActiveFilters({ authorType: 'user' } as any)).toBe(1);
+    });
+
+    it('counts each mentionId as 1', () => {
+      expect(countActiveFilters({ mentionIds: ['m1', 'm2'] } as any)).toBe(2);
+    });
+
+    it('does not count empty arrays', () => {
+      expect(countActiveFilters({ userIds: [] } as any)).toBe(0);
+      expect(countActiveFilters({ selectedHasTypes: [] } as any)).toBe(0);
+      expect(countActiveFilters({ mentionIds: [] } as any)).toBe(0);
+    });
+
+    it('aggregates a mixed criteria correctly', () => {
+      const c: SearchCriteria = {
+        searchMessageContent: 'hi',
+        userIds: ['u1'],
+        selectedHasTypes: ['image'],
+        searchAfterDate: 'd',
+        isPinned: IsPinnedType.YES,
+        authorType: 'user',
+        mentionIds: ['m1', 'm2'],
+      } as any;
+      // 1 + 1 + 1 + 1 + 1 + 1 + 2 = 8
+      expect(countActiveFilters(c)).toBe(8);
+      expect(hasActiveSearchFilters(c)).toBe(true);
+    });
+
+    it('countTotalFilters sums search + refine', () => {
+      const search = { searchMessageContent: 'a', userIds: ['u1'] } as any;
+      const refine = { selectedHasTypes: ['image', 'video'] } as any;
+      expect(countTotalFilters(search, refine)).toBe(4); // 2 + 2
     });
   });
 });
