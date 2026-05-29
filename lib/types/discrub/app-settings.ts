@@ -4,6 +4,7 @@ import { SortDirection } from "../../enum/common-enum";
 type AppSettingsMap = {
   [DiscrubSetting.BROWSER_ENV]: string;
   [DiscrubSetting.REACTIONS_ENABLED]: string;
+  [DiscrubSetting.REPLIES_ENABLED]: string;
   [DiscrubSetting.SERVER_NICKNAME_LOOKUP]: string;
   [DiscrubSetting.DISPLAY_NAME_LOOKUP]: string;
   [DiscrubSetting.SEARCH_DELAY]: string;

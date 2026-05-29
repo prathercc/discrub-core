@@ -282,6 +282,79 @@ export class MessageFetchService {
     }));
   }
 
+  /**
+   * Resolves `referenced_message` for type-19 (REPLY) messages whose
+   * pointer is populated but whose parent payload was omitted (typically
+   * the result of Discord's search endpoint, which returns
+   * message_reference without the inline parent).
+   *
+   * For each input reply, looks up the parent ID and fetches an
+   * `?around=<parent_id>` window of surrounding messages. Each returned
+   * message goes into a trackMap keyed by ID, so clustered replies
+   * (replies whose parents sit near each other in a channel) collapse to
+   * far fewer Discord calls than the raw reply count.
+   *
+   * Skips:
+   * - non-type-19 messages entirely (no API call)
+   * - replies that already have `referenced_message` populated
+   * - replies whose `message_reference.message_id` is missing
+   *
+   * Returns a new message array. Replies whose parent could not be
+   * resolved (around-fetch failed, or shouldStop fired before the
+   * lookup) end up with `referenced_message: undefined`, matching the
+   * pre-enrichment shape — the renderer's "Original message was
+   * deleted" fallback handles that exactly as it does today.
+   *
+   * Honors `config.shouldStop` for cooperative cancellation; on early
+   * break, partially-populated entries are still returned.
+   */
+  async resolveMessageReplies(messages: Message[]): Promise<Message[]> {
+    const trackMap: Record<string, Message> = {};
+    const eligible = messages.filter(
+      (m) =>
+        m.type === 19 &&
+        !m.referenced_message &&
+        !!m.message_reference?.message_id,
+    );
+
+    for (const [i, message] of eligible.entries()) {
+      if (await this.shouldStop()) break;
+
+      const parentId = message.message_reference!.message_id!;
+      if (trackMap[parentId]) continue; // already resolved via a prior around-window
+
+      this.config.onStatus?.(
+        `Resolving reply parents (${i + 1}/${eligible.length})`,
+      );
+
+      const { success, data } = await this.config.apiClient.fetchMessageData(
+        this.config.token,
+        parentId,
+        message.channel_id,
+        "around",
+      );
+
+      if (success && data) {
+        data.forEach((m) => {
+          trackMap[m.id] = m;
+        });
+      }
+    }
+
+    return messages.map((message) => {
+      if (
+        message.type !== 19 ||
+        message.referenced_message ||
+        !message.message_reference?.message_id
+      ) {
+        return message;
+      }
+      const parent = trackMap[message.message_reference.message_id];
+      if (!parent) return message;
+      return { ...message, referenced_message: parent };
+    });
+  }
+
   // Helper methods
   private async shouldStop(): Promise<boolean> {
     if (this.config.shouldStop) return await this.config.shouldStop();

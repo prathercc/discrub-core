@@ -4,6 +4,7 @@ export enum DiscrubSetting {
   //
 
   REACTIONS_ENABLED = "reactionsEnabled",
+  REPLIES_ENABLED = "repliesEnabled",
   SERVER_NICKNAME_LOOKUP = "serverNickNameLookup",
   DISPLAY_NAME_LOOKUP = "displayNameLookup",
   SEARCH_DELAY = "searchDelay2",

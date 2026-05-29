@@ -672,4 +672,177 @@ describe('MessageFetchService', () => {
       expect(result[0].reactions).toBeUndefined();
     });
   });
+
+  describe('resolveMessageReplies (public reply-enrichment surface) — #194', () => {
+    // Discord's /messages/search returns type-19 reply hits with their
+    // message_reference pointer populated but the referenced_message
+    // payload omitted. This method mirrors resolveMessageReactions: it
+    // fetches an ?around=<parent_id> window per unique parent, builds a
+    // trackMap keyed by message id, and splices the resolved parent back
+    // onto each reply as `referenced_message`.
+
+    const createReply = (id: string, channelId: string, refId: string): Message => ({
+      ...createMsg(id, channelId, 19),
+      message_reference: { message_id: refId, channel_id: channelId },
+    } as Message);
+
+    it('populates referenced_message from the around-window of each unique parent', async () => {
+      service = new MessageFetchService(mockConfig);
+      const inputs = [
+        createReply('reply-1', 'c1', 'parent-1'),
+        createReply('reply-2', 'c1', 'parent-2'),
+      ];
+
+      mockApiClient.fetchMessageData.mockImplementation(
+        async (_token: string, parentId: string) => ({
+          success: true,
+          data: [{ ...createMsg(parentId, 'c1'), content: `parent content for ${parentId}` }],
+        }),
+      );
+
+      const result = await service.resolveMessageReplies(inputs);
+
+      expect(result).toHaveLength(2);
+      expect(result[0].referenced_message?.id).toBe('parent-1');
+      expect(result[0].referenced_message?.content).toBe('parent content for parent-1');
+      expect(result[1].referenced_message?.id).toBe('parent-2');
+    });
+
+    it('uses around=<parent_id> on each per-parent lookup', async () => {
+      service = new MessageFetchService(mockConfig);
+      const inputs = [createReply('reply-1', 'c1', 'parent-1')];
+
+      mockApiClient.fetchMessageData.mockResolvedValue({
+        success: true,
+        data: [{ ...createMsg('parent-1', 'c1') }],
+      });
+
+      await service.resolveMessageReplies(inputs);
+
+      expect(mockApiClient.fetchMessageData).toHaveBeenCalledWith(
+        'test-token',
+        'parent-1',
+        'c1',
+        'around',
+      );
+    });
+
+    it('deduplicates within-pass via trackMap when one around-window pulls multiple parents', async () => {
+      service = new MessageFetchService(mockConfig);
+      const inputs = [
+        createReply('reply-1', 'c1', 'parent-1'),
+        createReply('reply-2', 'c1', 'parent-2'),
+      ];
+
+      // First around-call for parent-1 returns BOTH parent-1 and parent-2.
+      // parent-2 should not trigger a second around-call.
+      mockApiClient.fetchMessageData.mockResolvedValueOnce({
+        success: true,
+        data: [
+          { ...createMsg('parent-1', 'c1'), content: 'p1 content' },
+          { ...createMsg('parent-2', 'c1'), content: 'p2 content' },
+        ],
+      });
+
+      const result = await service.resolveMessageReplies(inputs);
+
+      expect(mockApiClient.fetchMessageData).toHaveBeenCalledTimes(1);
+      expect(result[0].referenced_message?.content).toBe('p1 content');
+      expect(result[1].referenced_message?.content).toBe('p2 content');
+    });
+
+    it('skips non-type-19 messages entirely (no around-call, referenced_message stays undefined)', async () => {
+      service = new MessageFetchService(mockConfig);
+      const inputs = [createMsg('msg-1', 'c1', 0)]; // plain message, not a reply
+
+      const result = await service.resolveMessageReplies(inputs);
+
+      expect(mockApiClient.fetchMessageData).not.toHaveBeenCalled();
+      expect(result[0].referenced_message).toBeUndefined();
+    });
+
+    it('skips replies that already have referenced_message populated', async () => {
+      service = new MessageFetchService(mockConfig);
+      const alreadyEnriched: Message = {
+        ...createReply('reply-1', 'c1', 'parent-1'),
+        referenced_message: { ...createMsg('parent-1', 'c1'), content: 'already here' },
+      } as Message;
+
+      const result = await service.resolveMessageReplies([alreadyEnriched]);
+
+      expect(mockApiClient.fetchMessageData).not.toHaveBeenCalled();
+      expect(result[0].referenced_message?.content).toBe('already here');
+    });
+
+    it('skips replies whose message_reference is missing message_id', async () => {
+      service = new MessageFetchService(mockConfig);
+      const malformed: Message = {
+        ...createReply('reply-1', 'c1', ''),
+        message_reference: { channel_id: 'c1' } as any,
+      } as Message;
+
+      const result = await service.resolveMessageReplies([malformed]);
+
+      expect(mockApiClient.fetchMessageData).not.toHaveBeenCalled();
+      expect(result[0].referenced_message).toBeUndefined();
+    });
+
+    it('honors shouldStop and returns partial enrichment on early break', async () => {
+      let calls = 0;
+      mockConfig.shouldStop = vi.fn().mockImplementation(async () => {
+        calls += 1;
+        return calls > 1;
+      });
+      service = new MessageFetchService(mockConfig);
+      const inputs = [
+        createReply('reply-1', 'c1', 'parent-1'),
+        createReply('reply-2', 'c1', 'parent-2'),
+      ];
+
+      mockApiClient.fetchMessageData.mockResolvedValue({
+        success: true,
+        data: [{ ...createMsg('parent-1', 'c1'), content: 'p1' }],
+      });
+
+      const result = await service.resolveMessageReplies(inputs);
+
+      expect(mockApiClient.fetchMessageData).toHaveBeenCalledTimes(1);
+      expect(result).toHaveLength(2);
+      expect(result[0].referenced_message?.content).toBe('p1');
+      expect(result[1].referenced_message).toBeUndefined();
+    });
+
+    it('leaves referenced_message undefined when the around-fetch fails', async () => {
+      service = new MessageFetchService(mockConfig);
+      const inputs = [createReply('reply-1', 'c1', 'parent-1')];
+
+      mockApiClient.fetchMessageData.mockResolvedValue({ success: false, data: null });
+
+      const result = await service.resolveMessageReplies(inputs);
+
+      expect(result).toHaveLength(1);
+      expect(result[0].referenced_message).toBeUndefined();
+    });
+
+    it('emits onStatus milestones during enrichment', async () => {
+      const onStatus = vi.fn();
+      mockConfig.onStatus = onStatus;
+      service = new MessageFetchService(mockConfig);
+      const inputs = [
+        createReply('reply-1', 'c1', 'parent-1'),
+        createReply('reply-2', 'c1', 'parent-2'),
+      ];
+
+      mockApiClient.fetchMessageData.mockResolvedValue({
+        success: true,
+        data: [{ ...createMsg('parent-1', 'c1') }],
+      });
+
+      await service.resolveMessageReplies(inputs);
+
+      expect(onStatus).toHaveBeenCalled();
+      const calls = onStatus.mock.calls.map((c) => c[0]);
+      expect(calls.some((m: string) => /reply/i.test(m))).toBe(true);
+    });
+  });
 });
