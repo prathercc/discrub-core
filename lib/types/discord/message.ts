@@ -9,6 +9,7 @@ import type { MessageActivityObject } from "./message-activity-object";
 import type { MessageCallObject } from "./message-call-object";
 import type { MessageInteractionObject } from "./message-interaction-object";
 import type { MessageReferenceObject } from "./message-reference-object";
+import type { PollObject } from "./poll-object";
 import type { Reaction } from "./reaction";
 import type { ResolvedDataObject } from "./resolved-data-object";
 import type { RoleSubscriptionDataObject } from "./role-subscription-data-object";
@@ -55,6 +56,7 @@ export type Message = {
   components?: ComponentObject[];
   sticker_items?: StickerItemObject[];
   stickers?: StickerObject[];
+  poll?: PollObject;
   position?: number;
   role_subscription_data?: RoleSubscriptionDataObject;
   resolved?: ResolvedDataObject;

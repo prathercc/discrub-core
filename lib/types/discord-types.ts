@@ -28,6 +28,7 @@ export type { MessageCallObject } from "./discord/message-call-object";
 export type { MessageInteractionObject } from "./discord/message-interaction-object";
 export type { MessageReferenceObject } from "./discord/message-reference-object";
 export type { OverwriteObject } from "./discord/overwrite-object";
+export type { PollObject, PollMediaObject, PollAnswerObject, PollAnswerCountObject, PollResultsObject } from "./discord/poll-object";
 export type { Reaction } from "./discord/reaction";
 export type { ReactionCountDetailsObject } from "./discord/reaction-count-details-object";
 export type { ResolvedDataObject } from "./discord/resolved-data-object";
