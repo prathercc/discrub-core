@@ -548,6 +548,23 @@ describe('DiscordService', () => {
       expect(result.data).toEqual(mockChannels);
     });
 
+    it('should fetch guild emojis from the per-guild emojis endpoint', async () => {
+      const mockEmojis = [
+        { id: '424242', name: 'pepe', animated: false, available: true },
+        { id: '434343', name: 'catjam', animated: true, available: true },
+      ];
+      vi.stubGlobal('fetch', mockFetchSuccess(mockEmojis));
+
+      const result = await service.fetchGuildEmojis(testGuildId, testAuth);
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(mockEmojis);
+      expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+        `${service.DISCORD_GUILDS_ENDPOINT}/${testGuildId}/emojis`,
+        expect.objectContaining({ method: 'GET' })
+      );
+    });
+
     it('should fetch single channel', async () => {
       vi.stubGlobal('fetch', mockFetchSuccess(mockTextChannel));
 

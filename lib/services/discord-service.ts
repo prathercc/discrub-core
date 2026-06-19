@@ -9,6 +9,7 @@ import {
   ArchivedThreadsResponse,
   ForumThreadSearchResponse,
   Channel,
+  Emoji,
   Guild,
   GuildChannelModify,
   GuildMemberObject,
@@ -246,6 +247,14 @@ class DiscordService {
   fetchChannels = (authorization: string, guildId: string) =>
     this.get<Channel[]>(
       `${this.DISCORD_GUILDS_ENDPOINT}/${guildId}/channels`,
+      authorization,
+    );
+
+  // The guild-list endpoint (/users/@me/guilds) returns partial guilds with
+  // no emoji array, so the custom emoji set must be fetched per guild here.
+  fetchGuildEmojis = (guildId: string, authorization: string) =>
+    this.get<Emoji[]>(
+      `${this.DISCORD_GUILDS_ENDPOINT}/${guildId}/emojis`,
       authorization,
     );
 
